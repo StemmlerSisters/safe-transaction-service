@@ -5,8 +5,7 @@ from django.core.paginator import Paginator
 from django.db import transaction
 
 from hexbytes import HexBytes
-
-from gnosis.eth import EthereumClient, EthereumClientProvider
+from safe_eth.eth import EthereumClient, get_auto_ethereum_client
 
 from ..indexers import (
     Erc20EventsIndexerProvider,
@@ -25,7 +24,7 @@ class ReorgServiceProvider:
             from django.conf import settings
 
             cls.instance = ReorgService(
-                EthereumClientProvider(),
+                get_auto_ethereum_client(),
                 settings.ETH_REORG_BLOCKS,
                 settings.ETH_REORG_BLOCKS_BATCH,
             )
@@ -109,6 +108,13 @@ class ReorgService:
             for database_block, blockchain_block in zip(
                 database_blocks, blockchain_blocks
             ):
+                if not blockchain_block:
+                    logger.error(
+                        "Block with number=%d cannot be retrieved from the RPC",
+                        database_block.number,
+                    )
+                    continue
+
                 if HexBytes(blockchain_block["hash"]) == HexBytes(
                     database_block.block_hash
                 ):

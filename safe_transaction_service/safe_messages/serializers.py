@@ -1,14 +1,14 @@
+import json
 from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
+import safe_eth.eth.django.serializers as eth_serializers
 from eth_typing import ChecksumAddress, HexStr
 from hexbytes import HexBytes
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
-
-import gnosis.eth.django.serializers as eth_serializers
-from gnosis.eth import EthereumClientProvider
-from gnosis.eth.eip712 import eip712_encode_hash
-from gnosis.safe.safe_signature import SafeSignature, SafeSignatureType
+from safe_eth.eth import get_auto_ethereum_client
+from safe_eth.eth.eip712 import eip712_encode_hash
+from safe_eth.safe.safe_signature import SafeSignature, SafeSignatureType
 
 from safe_transaction_service.utils.serializers import get_safe_owners
 
@@ -36,7 +36,7 @@ class SafeMessageSignatureParserMixin:
                 f"1 owner signature was expected, {len(safe_signatures)} received"
             )
 
-        ethereum_client = EthereumClientProvider()
+        ethereum_client = get_auto_ethereum_client()
         for safe_signature in safe_signatures:
             if not safe_signature.is_valid(ethereum_client, safe_address):
                 raise ValidationError(
@@ -65,6 +65,19 @@ class SafeMessageSerializer(SafeMessageSignatureParserMixin, serializers.Seriali
     signature = eth_serializers.HexadecimalField(
         min_length=65, max_length=SIGNATURE_LENGTH
     )
+    origin = serializers.CharField(max_length=200, allow_null=True, default=None)
+
+    def validate_origin(self, origin):
+        # Origin field on db is a JsonField
+        if origin:
+            try:
+                origin = json.loads(origin)
+            except ValueError:
+                pass
+        else:
+            origin = {}
+
+        return origin
 
     def validate_message(self, value: Union[str, Dict[str, Any]]):
         if isinstance(value, str):
@@ -99,7 +112,7 @@ class SafeMessageSerializer(SafeMessageSignatureParserMixin, serializers.Seriali
             )
 
         safe_signatures = SafeSignature.parse_signature(
-            signature, safe_message_hash, message_hash
+            signature, safe_message_hash, safe_hash_preimage=message_hash
         )
         owner, signature_type = self.get_valid_owner_from_signatures(
             safe_signatures, safe_address, None
@@ -141,7 +154,7 @@ class SafeMessageSignatureSerializer(
         safe_message_hash = safe_message.message_hash
 
         safe_signatures = SafeSignature.parse_signature(
-            signature, safe_message_hash, message_hash
+            signature, safe_message_hash, safe_hash_preimage=message_hash
         )
         owner, signature_type = self.get_valid_owner_from_signatures(
             safe_signatures, safe_address, safe_message
@@ -162,7 +175,7 @@ class SafeMessageSignatureSerializer(
         return safe_message_confirmation
 
 
-# Reponse serializers
+# Response serializers
 class SafeMessageConfirmationResponseSerializer(serializers.Serializer):
     created = serializers.DateTimeField()
     modified = serializers.DateTimeField()
@@ -184,6 +197,7 @@ class SafeMessageResponseSerializer(serializers.Serializer):
     safe_app_id = serializers.IntegerField()
     confirmations = serializers.SerializerMethodField()
     prepared_signature = serializers.SerializerMethodField()
+    origin = serializers.SerializerMethodField()
 
     def get_confirmations(self, obj: SafeMessage) -> Dict[str, Any]:
         """
@@ -205,3 +219,6 @@ class SafeMessageResponseSerializer(serializers.Serializer):
         """
         signature = HexBytes(obj.build_signature())
         return HexBytes(signature).hex() if signature else None
+
+    def get_origin(self, obj: SafeMessage) -> str:
+        return obj.origin if isinstance(obj.origin, str) else json.dumps(obj.origin)

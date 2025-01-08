@@ -1,8 +1,7 @@
 import factory
 from eth_account import Account
 from factory.django import DjangoModelFactory
-
-from gnosis.safe.safe_signature import SafeSignatureType
+from safe_eth.safe.safe_signature import SafeSignatureType
 
 from ..models import SafeMessage, SafeMessageConfirmation
 from ..utils import get_hash_for_message, get_safe_message_hash_for_message
@@ -16,6 +15,7 @@ class SafeMessageFactory(DjangoModelFactory):
     message = factory.Sequence(lambda n: f"message-{n}")
     proposed_by = factory.LazyFunction(lambda: Account.create().address)
     safe_app_id = factory.Sequence(lambda n: n)
+    origin = factory.Sequence(lambda n: {"url": f"random-url-{n}"})
 
     @factory.lazy_attribute
     def message_hash(self):

@@ -1,16 +1,15 @@
+import datetime
 from datetime import timedelta
 from unittest import mock
 from unittest.mock import MagicMock
 
 from django.db.models.signals import post_save
 from django.test import TestCase
+from django.utils import timezone
 
 import factory
-
-from gnosis.eth import EthereumNetwork
-from gnosis.safe.tests.safe_test_case import SafeTestCaseMixin
-
-from safe_transaction_service.notifications.tasks import send_notification_task
+from safe_eth.eth import EthereumNetwork
+from safe_eth.safe.tests.safe_test_case import SafeTestCaseMixin
 
 from ...events.services.queue_service import QueueService
 from ...safe_messages.models import SafeMessage, SafeMessageConfirmation
@@ -23,117 +22,111 @@ from ..models import (
     InternalTx,
     MultisigConfirmation,
     MultisigTransaction,
-    WebHookType,
+    TransactionServiceEventType,
 )
-from ..signals import build_webhook_payload, is_relevant_notification, process_webhook
-from ..tasks import send_webhook_task
+from ..signals import build_event_payload, is_relevant_notification
 from .factories import (
     ERC20TransferFactory,
     InternalTxFactory,
     MultisigConfirmationFactory,
     MultisigTransactionFactory,
+    SafeContractDelegateFactory,
+    SafeContractFactory,
 )
 
 
 class TestSignals(SafeTestCaseMixin, TestCase):
     @factory.django.mute_signals(post_save)
-    def test_build_webhook_payload(self):
+    def test_build_message_payload(self):
         self.assertEqual(
             [
                 payload["type"]
-                for payload in build_webhook_payload(
+                for payload in build_event_payload(
                     ERC20Transfer, ERC20TransferFactory()
                 )
             ],
-            [WebHookType.INCOMING_TOKEN.name, WebHookType.OUTGOING_TOKEN.name],
+            [
+                TransactionServiceEventType.INCOMING_TOKEN.name,
+                TransactionServiceEventType.OUTGOING_TOKEN.name,
+            ],
         )
         self.assertEqual(
             [
                 payload["type"]
-                for payload in build_webhook_payload(InternalTx, InternalTxFactory())
+                for payload in build_event_payload(InternalTx, InternalTxFactory())
             ],
-            [WebHookType.INCOMING_ETHER.name, WebHookType.OUTGOING_ETHER.name],
+            [
+                TransactionServiceEventType.INCOMING_ETHER.name,
+                TransactionServiceEventType.OUTGOING_ETHER.name,
+            ],
         )
         self.assertEqual(
             [
                 payload["chainId"]
-                for payload in build_webhook_payload(
+                for payload in build_event_payload(
                     ERC20Transfer, ERC20TransferFactory()
                 )
             ],
             [str(EthereumNetwork.GANACHE.value), str(EthereumNetwork.GANACHE.value)],
         )
 
-        payload = build_webhook_payload(
+        payload = build_event_payload(
             MultisigConfirmation, MultisigConfirmationFactory()
         )[0]
-        self.assertEqual(payload["type"], WebHookType.NEW_CONFIRMATION.name)
-        self.assertEqual(payload["chainId"], str(EthereumNetwork.GANACHE.value))
-
-        payload = build_webhook_payload(
-            MultisigTransaction, MultisigTransactionFactory()
-        )[0]
         self.assertEqual(
-            payload["type"], WebHookType.EXECUTED_MULTISIG_TRANSACTION.name
+            payload["type"], TransactionServiceEventType.NEW_CONFIRMATION.name
         )
         self.assertEqual(payload["chainId"], str(EthereumNetwork.GANACHE.value))
 
-        payload = build_webhook_payload(
-            MultisigTransaction, MultisigTransactionFactory(ethereum_tx=None)
+        payload = build_event_payload(
+            MultisigTransaction, MultisigTransactionFactory()
         )[0]
-        self.assertEqual(payload["type"], WebHookType.PENDING_MULTISIG_TRANSACTION.name)
+        self.assertEqual(
+            payload["type"],
+            TransactionServiceEventType.EXECUTED_MULTISIG_TRANSACTION.name,
+        )
         self.assertEqual(payload["chainId"], str(EthereumNetwork.GANACHE.value))
 
-        payload = build_webhook_payload(
+        payload = build_event_payload(
+            MultisigTransaction, MultisigTransactionFactory(ethereum_tx=None)
+        )[0]
+        self.assertEqual(
+            payload["type"],
+            TransactionServiceEventType.PENDING_MULTISIG_TRANSACTION.name,
+        )
+        self.assertEqual(payload["chainId"], str(EthereumNetwork.GANACHE.value))
+
+        payload = build_event_payload(
             MultisigTransaction,
             MultisigTransactionFactory(ethereum_tx=None),
             deleted=True,
         )[0]
-        self.assertEqual(payload["type"], WebHookType.DELETED_MULTISIG_TRANSACTION.name)
+        self.assertEqual(
+            payload["type"],
+            TransactionServiceEventType.DELETED_MULTISIG_TRANSACTION.name,
+        )
         self.assertEqual(payload["chainId"], str(EthereumNetwork.GANACHE.value))
 
         safe_address = self.deploy_test_safe().address
         safe_message = SafeMessageFactory(safe=safe_address)
-        payload = build_webhook_payload(SafeMessage, safe_message)[0]
-        self.assertEqual(payload["type"], WebHookType.MESSAGE_CREATED.name)
+        payload = build_event_payload(SafeMessage, safe_message)[0]
+        self.assertEqual(
+            payload["type"], TransactionServiceEventType.MESSAGE_CREATED.name
+        )
         self.assertEqual(payload["address"], safe_address)
         self.assertEqual(payload["messageHash"], safe_message.message_hash)
         self.assertEqual(payload["chainId"], str(EthereumNetwork.GANACHE.value))
 
-        payload = build_webhook_payload(
+        payload = build_event_payload(
             SafeMessageConfirmation,
             SafeMessageConfirmationFactory(safe_message=safe_message),
         )[0]
-        self.assertEqual(payload["type"], WebHookType.MESSAGE_CONFIRMATION.name)
+        self.assertEqual(
+            payload["type"], TransactionServiceEventType.MESSAGE_CONFIRMATION.name
+        )
         self.assertEqual(payload["address"], safe_address)
         self.assertEqual(payload["messageHash"], safe_message.message_hash)
         self.assertEqual(payload["chainId"], str(EthereumNetwork.GANACHE.value))
-
-    @factory.django.mute_signals(post_save)
-    @mock.patch.object(send_webhook_task, "apply_async")
-    @mock.patch.object(send_notification_task, "apply_async")
-    @mock.patch.object(QueueService, "send_event")
-    def test_process_webhook(
-        self,
-        send_event_mock: MagicMock,
-        webhook_task_mock: MagicMock,
-        send_notification_task_mock: MagicMock,
-    ):
-        multisig_confirmation = MultisigConfirmationFactory()
-        process_webhook(MultisigConfirmation, multisig_confirmation, True)
-        webhook_task_mock.assert_called()
-        send_notification_task_mock.assert_called()
-        send_event_mock.assert_called()
-        # reset calls
-        webhook_task_mock.reset_mock()
-        send_notification_task_mock.reset_mock()
-        send_event_mock.reset_mock()
-
-        multisig_confirmation.created -= timedelta(minutes=75)
-        process_webhook(MultisigConfirmation, multisig_confirmation, True)
-        webhook_task_mock.assert_not_called()
-        send_event_mock.assert_not_called()
-        send_notification_task_mock.assert_not_called()
 
     @factory.django.mute_signals(post_save)
     def test_is_relevant_notification_multisig_confirmation(self):
@@ -176,35 +169,26 @@ class TestSignals(SafeTestCaseMixin, TestCase):
             is_relevant_notification(multisig_tx.__class__, multisig_tx, created=False)
         )
 
-    @mock.patch.object(send_webhook_task, "apply_async")
     @mock.patch.object(QueueService, "send_event")
-    def test_signals_are_correctly_fired(
-        self,
-        send_event_mock: MagicMock,
-        webhook_task_mock: MagicMock,
-    ):
+    def test_signals_are_correctly_fired(self, send_event_mock: MagicMock):
         # Not trusted txs should not fire any event
         MultisigTransactionFactory(trusted=False)
-        webhook_task_mock.assert_not_called()
         send_event_mock.assert_not_called()
 
         # Trusted txs should fire an event
         multisig_tx: MultisigTransaction = MultisigTransactionFactory(trusted=True)
         pending_multisig_transaction_payload = {
             "address": multisig_tx.safe,
+            "to": multisig_tx.to,
             "safeTxHash": multisig_tx.safe_tx_hash,
-            "type": WebHookType.EXECUTED_MULTISIG_TRANSACTION.name,
+            "type": TransactionServiceEventType.EXECUTED_MULTISIG_TRANSACTION.name,
             "failed": "false",
             "txHash": multisig_tx.ethereum_tx_id,
             "chainId": str(EthereumNetwork.GANACHE.value),
         }
-        webhook_task_mock.assert_called_with(
-            args=(multisig_tx.safe, pending_multisig_transaction_payload), priority=2
-        )
         send_event_mock.assert_called_with(pending_multisig_transaction_payload)
 
         # Deleting a tx should fire an event
-        webhook_task_mock.reset_mock()
         send_event_mock.reset_mock()
         safe_tx_hash = multisig_tx.safe_tx_hash
         multisig_tx.delete()
@@ -212,11 +196,70 @@ class TestSignals(SafeTestCaseMixin, TestCase):
         deleted_multisig_transaction_payload = {
             "address": multisig_tx.safe,
             "safeTxHash": safe_tx_hash,
-            "type": WebHookType.DELETED_MULTISIG_TRANSACTION.name,
+            "type": TransactionServiceEventType.DELETED_MULTISIG_TRANSACTION.name,
             "chainId": str(EthereumNetwork.GANACHE.value),
         }
-
-        webhook_task_mock.assert_called_with(
-            args=(multisig_tx.safe, deleted_multisig_transaction_payload), priority=2
-        )
         send_event_mock.assert_called_with(deleted_multisig_transaction_payload)
+
+    @mock.patch.object(QueueService, "send_event")
+    def test_delegates_signals_are_correctly_fired(self, send_event_mock: MagicMock):
+        # New delegate should fire an event
+        delegate_for_safe = SafeContractDelegateFactory()
+        new_delegate_user_payload = {
+            "type": TransactionServiceEventType.NEW_DELEGATE.name,
+            "address": delegate_for_safe.safe_contract.address,
+            "delegate": delegate_for_safe.delegate,
+            "delegator": delegate_for_safe.delegator,
+            "label": delegate_for_safe.label,
+            "expiryDateSeconds": int(delegate_for_safe.expiry_date.timestamp()),
+            "chainId": str(EthereumNetwork.GANACHE.value),
+        }
+        send_event_mock.assert_called_with(new_delegate_user_payload)
+
+        permanent_delegate_without_safe = SafeContractDelegateFactory(
+            safe_contract=None, expiry_date=None
+        )
+        new_delegate_user_payload = {
+            "type": TransactionServiceEventType.NEW_DELEGATE.name,
+            "address": None,
+            "delegate": permanent_delegate_without_safe.delegate,
+            "delegator": permanent_delegate_without_safe.delegator,
+            "label": permanent_delegate_without_safe.label,
+            "expiryDateSeconds": None,
+            "chainId": str(EthereumNetwork.GANACHE.value),
+        }
+        send_event_mock.assert_called_with(new_delegate_user_payload)
+
+        # Updated delegate should fire an event
+        delegate_to_update = SafeContractDelegateFactory()
+        new_safe = SafeContractFactory()
+        new_label = "Updated Label"
+        new_expiry_date = timezone.now() + datetime.timedelta(minutes=5)
+        delegate_to_update.safe_contract = new_safe
+        delegate_to_update.label = new_label
+        delegate_to_update.expiry_date = new_expiry_date
+        delegate_to_update.save()
+        updated_delegate_user_payload = {
+            "type": TransactionServiceEventType.UPDATED_DELEGATE.name,
+            "address": new_safe.address,
+            "delegate": delegate_to_update.delegate,
+            "delegator": delegate_to_update.delegator,
+            "label": new_label,
+            "expiryDateSeconds": int(new_expiry_date.timestamp()),
+            "chainId": str(EthereumNetwork.GANACHE.value),
+        }
+        send_event_mock.assert_called_with(updated_delegate_user_payload)
+
+        # Deleted delegate should fire an event
+        delegate_to_delete = SafeContractDelegateFactory()
+        delegate_to_delete.delete()
+        updated_delegate_user_payload = {
+            "type": TransactionServiceEventType.DELETED_DELEGATE.name,
+            "address": delegate_to_delete.safe_contract.address,
+            "delegate": delegate_to_delete.delegate,
+            "delegator": delegate_to_delete.delegator,
+            "label": delegate_to_delete.label,
+            "expiryDateSeconds": int(delegate_to_delete.expiry_date.timestamp()),
+            "chainId": str(EthereumNetwork.GANACHE.value),
+        }
+        send_event_mock.assert_called_with(updated_delegate_user_payload)

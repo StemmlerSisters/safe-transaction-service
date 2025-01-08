@@ -1,7 +1,7 @@
 import logging
 import os
 from json import JSONDecodeError
-from typing import Any, Dict, List, Optional
+from typing import Optional, TypedDict
 from urllib.parse import urljoin
 
 from django.conf import settings
@@ -16,10 +16,9 @@ from eth_abi.exceptions import DecodingError
 from eth_typing import ChecksumAddress
 from imagekit.models import ProcessedImageField
 from pilkit.processors import Resize
+from safe_eth.eth import InvalidERC20Info, InvalidERC721Info, get_auto_ethereum_client
+from safe_eth.eth.django.models import EthereumAddressBinaryField
 from web3.exceptions import Web3Exception
-
-from gnosis.eth import EthereumClientProvider, InvalidERC20Info, InvalidERC721Info
-from gnosis.eth.django.models import EthereumAddressV2Field
 
 from .clients.zerion_client import (
     BalancerTokenAdapterClient,
@@ -66,7 +65,7 @@ class PoolTokenManager(models.Manager):
         All Uniswap V2 tokens have the same name: "Uniswap V2". This method will return better names
         :return: Number of pool tokens fixed
         """
-        zerion_client = ZerionUniswapV2TokenAdapterClient(EthereumClientProvider())
+        zerion_client = ZerionUniswapV2TokenAdapterClient(get_auto_ethereum_client())
         return self._fix_pool_tokens("Uniswap V2", zerion_client)
 
     def fix_balancer_pool_tokens(self) -> int:
@@ -74,7 +73,7 @@ class PoolTokenManager(models.Manager):
         All Uniswap V2 tokens have the same name: "Uniswap V2". This method will return better names
         :return: Number of pool tokens fixed
         """
-        zerion_client = BalancerTokenAdapterClient(EthereumClientProvider())
+        zerion_client = BalancerTokenAdapterClient(get_auto_ethereum_client())
         return self._fix_pool_tokens("Balancer Pool Token", zerion_client)
 
 
@@ -87,7 +86,11 @@ class TokenManager(models.Manager):
     def create_from_blockchain(
         self, token_address: ChecksumAddress
     ) -> Optional["Token"]:
-        ethereum_client = EthereumClientProvider()
+        if TokenNotValid.objects.filter(address=token_address).exists():
+            # If token is not valid, ignore it
+            return None
+
+        ethereum_client = get_auto_ethereum_client()
         if token_address in ENS_CONTRACTS_WITH_TLD:  # Special case for ENS
             return self.create(
                 address=token_address,
@@ -119,6 +122,7 @@ class TokenManager(models.Manager):
                 logger.debug(
                     "Cannot find anything on blockchain for token=%s", token_address
                 )
+                TokenNotValid.objects.get_or_create(address=token_address)
                 return None
 
         # Ignore tokens with empty name or symbol
@@ -126,9 +130,10 @@ class TokenManager(models.Manager):
             logger.warning(
                 "Token with address=%s has not name or symbol", token_address
             )
+            TokenNotValid.objects.get_or_create(address=token_address)
             return None
 
-        name_and_symbol: List[str] = []
+        name_and_symbol: list[str] = []
         for text in (erc_info.name, erc_info.symbol):
             if isinstance(text, str):
                 text = text.encode()
@@ -205,7 +210,7 @@ class TokenQuerySet(models.QuerySet):
 class Token(models.Model):
     objects = TokenManager.from_queryset(TokenQuerySet)()
     pool_tokens = PoolTokenManager()
-    address = EthereumAddressV2Field(primary_key=True)
+    address = EthereumAddressBinaryField(primary_key=True)
     name = models.CharField(max_length=60)
     symbol = models.CharField(max_length=60)
     decimals = models.PositiveSmallIntegerField(
@@ -222,6 +227,11 @@ class Token(models.Model):
         format="PNG",
         processors=[Resize(256, 256, upscale=False)],
     )
+    logo_uri = models.URLField(
+        default="",
+        blank=True,
+        help_text="If provided, return this URI instead of the stored logo",
+    )
     events_bugged = models.BooleanField(
         default=False,
         help_text="Set `True` if token does not send `Transfer` event sometimes (e.g. WETH on minting)",
@@ -232,7 +242,7 @@ class Token(models.Model):
     trusted = models.BooleanField(
         default=False, help_text="Spam and trusted cannot be both True"
     )
-    copy_price = EthereumAddressV2Field(
+    copy_price = EthereumAddressBinaryField(
         null=True, blank=True, help_text="If provided, copy the price from the token"
     )
 
@@ -279,27 +289,48 @@ class Token(models.Model):
     def get_full_logo_uri(self) -> str:
         if self.logo:
             return self.logo.url
-        elif settings.AWS_S3_PUBLIC_URL:
+
+        if self.logo_uri:
+            return self.logo_uri
+
+        if settings.AWS_S3_PUBLIC_URL:
             return urljoin(
                 settings.AWS_S3_PUBLIC_URL,
                 get_token_logo_path(
                     self, self.address + settings.TOKENS_LOGO_EXTENSION
                 ),
             )
-        else:
-            # Old behaviour
-            return urljoin(
-                settings.TOKENS_LOGO_BASE_URI,
-                get_token_logo_path(
-                    self, self.address + settings.TOKENS_LOGO_EXTENSION
-                ),
-            )
+
+        # Old behaviour
+        return urljoin(
+            settings.TOKENS_LOGO_BASE_URI,
+            get_token_logo_path(self, self.address + settings.TOKENS_LOGO_EXTENSION),
+        )
 
     def get_price_address(self) -> ChecksumAddress:
         """
         :return: Address to use to retrieve the token price
         """
         return self.copy_price or self.address
+
+
+class TokenNotValid(models.Model):
+    """
+    Stores information about tokens not valid (missing name or symbol, for example), so they are not requested
+    again to the RPC
+    """
+
+    address = EthereumAddressBinaryField(primary_key=True)
+
+
+class TokenListToken(TypedDict):
+    symbol: str
+    name: str
+    address: str  # Can be an ENS address
+    decimals: int
+    chainId: int
+    logoURI: str
+    tags: list[str] | None
 
 
 class TokenList(models.Model):
@@ -309,7 +340,7 @@ class TokenList(models.Model):
     def __str__(self):
         return f"{self.description} token list"
 
-    def get_tokens(self) -> List[Dict[str, Any]]:
+    def get_tokens(self) -> list[TokenListToken]:
         try:
             response = requests.get(self.url, timeout=5)
             if response.ok:

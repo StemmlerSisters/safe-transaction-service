@@ -15,11 +15,10 @@ from botocore.exceptions import ClientError
 from cachetools import TTLCache, cachedmethod
 from imagekit.models import ProcessedImageField
 from pilkit.processors import Resize
+from safe_eth.eth.clients import ContractMetadata
+from safe_eth.eth.django.models import EthereumAddressBinaryField, Keccak256Field
+from safe_eth.eth.utils import fast_keccak
 from web3._utils.normalizers import normalize_abi
-
-from gnosis.eth.clients import ContractMetadata
-from gnosis.eth.django.models import EthereumAddressV2Field, Keccak256Field
-from gnosis.eth.utils import fast_keccak
 
 logger = getLogger(__name__)
 
@@ -152,7 +151,7 @@ class ContractQuerySet(models.QuerySet):
 
 class Contract(models.Model):  # Known contract addresses by the service
     objects = ContractManager.from_queryset(ContractQuerySet)()
-    address = EthereumAddressV2Field(primary_key=True)
+    address = EthereumAddressBinaryField(primary_key=True)
     name = models.CharField(max_length=200, blank=True, default="")
     display_name = models.CharField(max_length=200, blank=True, default="")
     logo = ProcessedImageField(
