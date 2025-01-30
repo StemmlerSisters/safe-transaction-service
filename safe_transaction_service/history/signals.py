@@ -1,6 +1,7 @@
 from logging import getLogger
 from typing import Type, Union
 
+from django.conf import settings
 from django.db.models import Model
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
@@ -9,6 +10,7 @@ from django.utils import timezone
 from safe_transaction_service.notifications.tasks import send_notification_task
 
 from ..events.services.queue_service import get_queue_service
+from .cache import remove_cache_view_by_instance
 from .models import (
     ERC20Transfer,
     ERC721Transfer,
@@ -17,13 +19,18 @@ from .models import (
     MultisigConfirmation,
     MultisigTransaction,
     SafeContract,
+    SafeContractDelegate,
     SafeLastStatus,
     SafeMasterCopy,
     SafeStatus,
     TokenTransfer,
 )
-from .services.webhooks import build_webhook_payload, is_relevant_notification
-from .tasks import send_webhook_task
+from .services.notification_service import (
+    build_delete_delegate_payload,
+    build_event_payload,
+    build_save_delegate_payload,
+    is_relevant_notification,
+)
 
 logger = getLogger(__name__)
 
@@ -112,7 +119,7 @@ def safe_master_copy_clear_cache(
     SafeMasterCopy.objects.get_version_for_address.cache_clear()
 
 
-def _process_webhook(
+def _process_notification_event(
     sender: Type[Model],
     instance: Union[
         TokenTransfer,
@@ -123,13 +130,26 @@ def _process_webhook(
     ],
     created: bool,
     deleted: bool,
-):
+) -> None:
+    """
+    Process models and
+    :param sender:
+    :param instance:
+    :param created:
+    :param deleted:
+    :return:
+    """
+    if settings.DISABLE_NOTIFICATIONS_AND_EVENTS:
+        return None
+
     assert not (
         created and deleted
     ), "An instance cannot be created and deleted at the same time"
 
+    logger.debug("Removing cache for object=%s", instance)
+    remove_cache_view_by_instance(instance)
     logger.debug("Start building payloads for created=%s object=%s", created, instance)
-    payloads = build_webhook_payload(sender, instance, deleted=deleted)
+    payloads = build_event_payload(sender, instance, deleted=deleted)
     logger.debug(
         "End building payloads %s for created=%s object=%s", payloads, created, instance
     )
@@ -137,13 +157,10 @@ def _process_webhook(
         if address := payload.get("address"):
             if is_relevant_notification(sender, instance, created):
                 logger.debug(
-                    "Triggering send_webhook and send_notification tasks for created=%s object=%s",
+                    "Triggering send_notification tasks for created=%s object=%s",
                     created,
                     instance,
                 )
-                send_webhook_task.apply_async(
-                    args=(address, payload), priority=2  # Almost lowest priority
-                )  # Almost the lowest priority
                 send_notification_task.apply_async(
                     args=(address, payload),
                     countdown=5,
@@ -162,27 +179,37 @@ def _process_webhook(
 @receiver(
     post_save,
     sender=ModuleTransaction,
-    dispatch_uid="module_transaction.process_webhook",
+    dispatch_uid="module_transaction.process_notification_event",
 )
 @receiver(
     post_save,
     sender=MultisigConfirmation,
-    dispatch_uid="multisig_confirmation.process_webhook",
+    dispatch_uid="multisig_confirmation.process_notification_event",
 )
 @receiver(
     post_save,
     sender=MultisigTransaction,
-    dispatch_uid="multisig_transaction.process_webhook",
+    dispatch_uid="multisig_transaction.process_notification_event",
 )
 @receiver(
-    post_save, sender=ERC20Transfer, dispatch_uid="erc20_transfer.process_webhook"
+    post_save,
+    sender=ERC20Transfer,
+    dispatch_uid="erc20_transfer.process_notification_event",
 )
 @receiver(
-    post_save, sender=ERC721Transfer, dispatch_uid="erc721_transfer.process_webhook"
+    post_save,
+    sender=ERC721Transfer,
+    dispatch_uid="erc721_transfer.process_notification_event",
 )
-@receiver(post_save, sender=InternalTx, dispatch_uid="internal_tx.process_webhook")
-@receiver(post_save, sender=SafeContract, dispatch_uid="safe_contract.process_webhook")
-def process_webhook(
+@receiver(
+    post_save, sender=InternalTx, dispatch_uid="internal_tx.process_notification_event"
+)
+@receiver(
+    post_save,
+    sender=SafeContract,
+    dispatch_uid="safe_contract.process_notification_event",
+)
+def process_notification_event(
     sender: Type[Model],
     instance: Union[
         TokenTransfer,
@@ -194,18 +221,18 @@ def process_webhook(
     created: bool,
     **kwargs,
 ) -> None:
-    return _process_webhook(sender, instance, created, False)
+    return _process_notification_event(sender, instance, created, False)
 
 
 @receiver(
     post_delete,
     sender=MultisigTransaction,
-    dispatch_uid="multisig_transaction.process_delete_webhook",
+    dispatch_uid="multisig_transaction.process_delete_notification_event",
 )
-def process_delete_webhook(
+def process_delete_notification_event(
     sender: Type[Model], instance: MultisigTransaction, *args, **kwargs
 ):
-    return _process_webhook(sender, instance, False, True)
+    return _process_notification_event(sender, instance, False, True)
 
 
 @receiver(
@@ -236,3 +263,32 @@ def add_to_historical_table(
     safe_status = SafeStatus.from_status_instance(instance)
     safe_status.save()
     return safe_status
+
+
+@receiver(
+    post_save,
+    sender=SafeContractDelegate,
+    dispatch_uid="safe_contract_delegate.process_save_delegate_user_event",
+)
+def process_save_delegate_user_event(
+    sender: Type[Model],
+    instance: SafeContractDelegate,
+    created: bool,
+    **kwargs,
+):
+    payload_event = build_save_delegate_payload(instance, created)
+    queue_service = get_queue_service()
+    queue_service.send_event(payload_event)
+
+
+@receiver(
+    post_delete,
+    sender=SafeContractDelegate,
+    dispatch_uid="safe_contract_delegate.process_delete_delegate_user_event",
+)
+def process_delete_delegate_user_event(
+    sender: Type[Model], instance: SafeContractDelegate, *args, **kwargs
+):
+    payload_event = build_delete_delegate_payload(instance)
+    queue_service = get_queue_service()
+    queue_service.send_event(payload_event)

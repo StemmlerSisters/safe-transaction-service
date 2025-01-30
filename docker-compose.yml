@@ -34,7 +34,7 @@ services:
       retries: 3
 
   db:
-    image: postgres:14-alpine
+    image: postgres:16-alpine
     ports:
       - "5432:5432"
     environment:
@@ -69,7 +69,7 @@ services:
       - .env
     environment:
       RUN_MIGRATIONS: 1
-      WORKER_QUEUES: "default,indexing"
+      WORKER_QUEUES: "default,indexing,processing"
     depends_on:
       - db
       - redis

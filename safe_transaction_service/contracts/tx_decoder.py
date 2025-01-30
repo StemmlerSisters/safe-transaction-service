@@ -24,17 +24,12 @@ from eth_abi.exceptions import DecodingError
 from eth_typing import ChecksumAddress, HexStr
 from eth_utils import function_abi_to_4byte_selector
 from hexbytes import HexBytes
-from web3 import Web3
-from web3._utils.abi import get_abi_input_names, get_abi_input_types, map_abi_data
-from web3._utils.normalizers import BASE_RETURN_NORMALIZERS
-from web3.contract import Contract
-from web3.types import ABIFunction
-
-from gnosis.eth.contracts import (
+from safe_eth.eth.contracts import (
     get_erc20_contract,
     get_erc721_contract,
     get_kyber_network_proxy_contract,
     get_multi_send_contract,
+    get_safe_to_l2_migration_contract,
     get_safe_V0_0_1_contract,
     get_safe_V1_0_0_contract,
     get_safe_V1_1_1_contract,
@@ -42,7 +37,12 @@ from gnosis.eth.contracts import (
     get_safe_V1_4_1_contract,
     get_uniswap_exchange_contract,
 )
-from gnosis.safe.multi_send import MultiSend
+from safe_eth.safe.multi_send import MultiSend
+from web3 import Web3
+from web3._utils.abi import get_abi_input_names, get_abi_input_types, map_abi_data
+from web3._utils.normalizers import BASE_RETURN_NORMALIZERS
+from web3.contract import Contract
+from web3.types import ABIFunction
 
 from safe_transaction_service.contracts.models import ContractAbi
 from safe_transaction_service.utils.utils import running_on_gevent
@@ -226,7 +226,7 @@ class SafeTxDecoder:
         return fn_abi["name"], list(zip(names, types, values))
 
     def _generate_selectors_with_abis_from_abi(
-        self, abi: ABIFunction
+        self, abi: Sequence[ABIFunction]
     ) -> Dict[bytes, ABIFunction]:
         """
         :param abi: ABI
@@ -239,7 +239,7 @@ class SafeTxDecoder:
         }
 
     def _generate_selectors_with_abis_from_abis(
-        self, abis: Sequence[ABIFunction]
+        self, abis: Sequence[Sequence[ABIFunction]]
     ) -> Dict[bytes, ABIFunction]:
         """
         :param abis: Contract ABIs. Last ABIs on the Sequence have preference if there's a collision on the
@@ -336,7 +336,7 @@ class SafeTxDecoder:
         }
         return fn_name, decoded_transactions
 
-    def get_supported_abis(self) -> Iterable[ABIFunction]:
+    def get_supported_abis(self) -> List[Sequence[ABIFunction]]:
         safe_abis = [
             get_safe_V0_0_1_contract(self.dummy_w3).abi,
             get_safe_V1_0_0_contract(self.dummy_w3).abi,
@@ -376,7 +376,7 @@ class TxDecoder(SafeTxDecoder):
     """
 
     @cached_property
-    def multisend_abis(self) -> List[ABIFunction]:
+    def multisend_abis(self) -> List[Sequence[ABIFunction]]:
         return [get_multi_send_contract(self.dummy_w3).abi]
 
     @cached_property
@@ -477,6 +477,9 @@ class TxDecoder(SafeTxDecoder):
         ]
 
         gnosis_safe = [gnosis_safe_allowance_module_abi]
+
+        safe_to_l2_migration = [get_safe_to_l2_migration_contract(self.dummy_w3).abi]
+
         erc_contracts = [
             get_erc721_contract(self.dummy_w3).abi,
             get_erc20_contract(self.dummy_w3).abi,
@@ -503,6 +506,7 @@ class TxDecoder(SafeTxDecoder):
             + sight_contracts
             + gnosis_protocol
             + gnosis_safe
+            + safe_to_l2_migration
             + erc_contracts
             + self.multisend_abis
             + supported_abis
@@ -547,22 +551,57 @@ class DbTxDecoder(TxDecoder):
     """
 
     cache_abis_by_address = TTLCache(maxsize=2048, ttl=60 * 5)  # 5 minutes of caching
+    cache_contract_abi_selectors_with_functions_by_address = TTLCache(
+        maxsize=2048, ttl=60 * 5
+    )  # 5 minutes of caching
 
     @cachedmethod(cache=operator.attrgetter("cache_abis_by_address"))
-    def get_contract_abi(
+    def get_contract_abi(self, address: ChecksumAddress) -> Optional[List[ABIFunction]]:
+        """
+        Retrieves the ABI for the contract at the given address.
+
+        :param address: Contract address
+        :return: List of ABI data if found, `None` otherwise.
+        """
+        return (
+            ContractAbi.objects.filter(contracts__address=address)
+            .values_list("abi", flat=True)
+            .first()
+        )
+
+    def get_contract_fallback_function(
+        self, address: ChecksumAddress
+    ) -> Optional[ABIFunction]:
+        """
+        :param address: Contract address
+        :return: Fallback ABIFunction if found, `None` otherwise.
+        """
+        abi = self.get_contract_abi(address)
+        if abi:
+            return next(
+                (
+                    dict(fn_abi, name="fallback")
+                    for fn_abi in abi
+                    if fn_abi.get("type") == "fallback"
+                ),
+                None,
+            )
+
+    @cachedmethod(
+        cache=operator.attrgetter(
+            "cache_contract_abi_selectors_with_functions_by_address"
+        )
+    )
+    def get_contract_abi_selectors_with_functions(
         self, address: ChecksumAddress
     ) -> Optional[Dict[bytes, ABIFunction]]:
         """
         :param address: Contract address
         :return: Dictionary of function selects with ABIFunction if found, `None` otherwise
         """
-        abis = (
-            ContractAbi.objects.filter(contracts__address=address)
-            .order_by("relevance")
-            .values_list("abi", flat=True)
-        )
-        if abis:
-            return self._generate_selectors_with_abis_from_abi(abis[0])
+        abi = self.get_contract_abi(address)
+        if abi:
+            return self._generate_selectors_with_abis_from_abi(abi)
 
     def get_abi_function(
         self, data: bytes, address: Optional[ChecksumAddress] = None
@@ -577,7 +616,9 @@ class DbTxDecoder(TxDecoder):
         if selector in self.fn_selectors_with_abis:
             # Try to use specific ABI if address provided
             if address:
-                contract_selectors_with_abis = self.get_contract_abi(address)
+                contract_selectors_with_abis = (
+                    self.get_contract_abi_selectors_with_functions(address)
+                )
                 if (
                     contract_selectors_with_abis
                     and selector in contract_selectors_with_abis
@@ -586,6 +627,9 @@ class DbTxDecoder(TxDecoder):
                     # Otherwise we fall back to the general abi that matches the selector
                     return contract_selectors_with_abis[selector]
             return self.fn_selectors_with_abis[selector]
+        # Check if the contract has a fallback call and return a minimal ABIFunction for fallback call
+        elif address:
+            return self.get_contract_fallback_function(address)
 
     def get_supported_abis(self) -> Iterable[Type[Contract]]:
         supported_abis = super().get_supported_abis()

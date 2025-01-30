@@ -1,9 +1,7 @@
 import logging
 import operator
 from dataclasses import dataclass
-from datetime import datetime
-from enum import Enum
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 from django.conf import settings
 from django.core.cache import cache as django_cache
@@ -13,9 +11,8 @@ from cache_memoize import cache_memoize
 from cachetools import TTLCache, cachedmethod
 from eth_typing import ChecksumAddress
 from redis import Redis
-
-from gnosis.eth import EthereumClient, EthereumClientProvider
-from gnosis.eth.utils import fast_is_checksum_address
+from safe_eth.eth import EthereumClient, get_auto_ethereum_client
+from safe_eth.eth.utils import fast_is_checksum_address
 
 from safe_transaction_service.tokens.models import Token
 from safe_transaction_service.utils.redis import get_redis
@@ -67,24 +64,10 @@ class Balance:
         return self.token_address
 
 
-class FiatCode(Enum):
-    USD = 1
-    EUR = 2
-
-
-@dataclass
-class BalanceWithFiat(Balance):
-    eth_value: float  # Value in ether
-    timestamp: datetime  # Calculated timestamp
-    fiat_balance: float
-    fiat_conversion: float
-    fiat_code: str = FiatCode.USD.name
-
-
 class BalanceServiceProvider:
     def __new__(cls):
         if not hasattr(cls, "instance"):
-            cls.instance = BalanceService(EthereumClientProvider(), get_redis())
+            cls.instance = BalanceService(get_auto_ethereum_client(), get_redis())
         return cls.instance
 
     @classmethod
@@ -102,17 +85,19 @@ class BalanceService:
             maxsize=4096, ttl=60 * 30
         )  # 2 hours of caching
 
-    def _filter_addresses(
+    def _filter_tokens(
         self,
         erc20_addresses: Sequence[ChecksumAddress],
         only_trusted: bool,
         exclude_spam: bool,
     ) -> List[ChecksumAddress]:
         """
+        Filter the provided `erc20_addresses` list and tokens with `events_bugged=True` by spam or trusted.
+
         :param erc20_addresses:
         :param only_trusted:
         :param exclude_spam:
-        :return: ERC20 tokens filtered by spam or trusted
+        :return: ERC20 tokens filtered.
         """
         base_queryset = Token.objects.filter(
             Q(address__in=erc20_addresses) | Q(events_bugged=True)
@@ -150,13 +135,20 @@ class BalanceService:
         safe_address: ChecksumAddress,
         only_trusted: bool = False,
         exclude_spam: bool = False,
-    ):
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> Tuple[List[Balance], int]:
         """
+        Get a list of balances including native token balance.
+        For ether, `token_address` is `None`.
+        Elements are cached for one hour
+
         :param safe_address:
         :param only_trusted: If True, return balance only for trusted tokens
         :param exclude_spam: If True, exclude spam tokens
-        :return: `{'token_address': str, 'balance': int}`. For ether, `token_address` is `None`. Elements are cached
-        for one hour
+        :param limit:
+        :param offset:
+        :return: a list of `{'token_address': str, 'balance': int}` and the number of different tokens for the providen Safe.
         """
 
         # Cache based on the number of erc20 events and the ether transferred, and also check outgoing ether
@@ -167,50 +159,101 @@ class BalanceService:
             .filter(safe=safe_address)
             .count()
         )
-        number_erc20_events = ERC20Transfer.objects.to_or_from(safe_address).count()
+        number_erc20_events = ERC20Transfer.objects.fast_count(safe_address)
         number_eth_events = InternalTx.objects.ether_txs_for_address(
             safe_address
         ).count()
         cache_key = (
-            f"balances:{safe_address}:{only_trusted}:{exclude_spam}:"
+            f"balances:{safe_address}:{only_trusted}:{exclude_spam}:{limit}:{offset}"
             f"{number_erc20_events}:{number_eth_events}:{events_sending_eth}"
         )
+        cache_key_count = f"balances-count:{safe_address}:{only_trusted}:{exclude_spam}"
         if balances := django_cache.get(cache_key):
-            return balances
+            count = django_cache.get(cache_key_count)
+            return balances, count
         else:
-            balances = self._get_balances(safe_address, only_trusted, exclude_spam)
+            balances, count = self._get_balances(
+                safe_address, only_trusted, exclude_spam, limit, offset
+            )
             django_cache.set(cache_key, balances, 60 * 10)  # 10 minutes cache
-            return balances
+            django_cache.set(cache_key_count, count, 60 * 10)  # 10 minutes cache
+            return balances, count
+
+    def _get_page_erc20_balances(
+        self,
+        safe_address: ChecksumAddress,
+        only_trusted: bool = False,
+        exclude_spam: bool = False,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> Tuple[List[ChecksumAddress], int]:
+        """
+        :param safe_address:
+        :param only_trusted:
+        :param exclude_spam:
+        :param limit:
+        :param offset:
+        :return: List of ERC20 token addresses (paginated if `limit` is provided)
+            and count of all ERC20 addresses for a given Safe
+        """
+        all_erc20_addresses = ERC20Transfer.objects.tokens_used_by_address(safe_address)
+        for address in all_erc20_addresses:
+            # Store tokens in database if not present
+            self.get_token_info(address)  # This is cached
+        erc20_addresses = self._filter_tokens(
+            all_erc20_addresses, only_trusted, exclude_spam
+        )
+        # Total count should take into account the request filters
+        erc20_count = len(erc20_addresses)
+
+        if not limit:
+            # No limit, no pagination
+            return erc20_addresses, erc20_count
+
+        if offset == 0:
+            # First page will include also native token balance
+            return erc20_addresses[offset : limit - 1], erc20_count
+        else:
+            # Include previous ERC20 after first page
+            previous_offset = offset - 1
+            return (
+                erc20_addresses[previous_offset : previous_offset + limit],
+                erc20_count,
+            )
 
     def _get_balances(
         self,
         safe_address: ChecksumAddress,
         only_trusted: bool = False,
         exclude_spam: bool = False,
-    ) -> List[Balance]:
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> Tuple[List[Balance], int]:
         """
+        Get a list of balances including native token balance.
+        For ether, `token_address` is `None`.
+        Elements are cached for one hour
+
         :param safe_address:
         :param only_trusted: If True, return balance only for trusted tokens
         :param exclude_spam: If True, exclude spam tokens
-        :return: `{'token_address': str, 'balance': int}`. For ether, `token_address` is `None`
+        :param limit:
+        :param offset:
+        :return: a list of `{'token_address': str, 'balance': int}` and the number of different tokens for the providen Safe.
         """
         assert fast_is_checksum_address(
             safe_address
         ), f"Not valid address {safe_address} for getting balances"
 
-        all_erc20_addresses = ERC20Transfer.objects.tokens_used_by_address(safe_address)
-        for address in all_erc20_addresses:
-            # Store tokens in database if not present
-            self.get_token_info(address)  # This is cached
-        erc20_addresses = self._filter_addresses(
-            all_erc20_addresses, only_trusted, exclude_spam
+        erc20_addresses_page, erc20_count = self._get_page_erc20_balances(
+            safe_address, only_trusted, exclude_spam, limit, offset
         )
 
         try:
             raw_balances = []
             # With a lot of addresses an HTTP 413 error will be raised
             for erc20_addresses_chunk in chunks(
-                erc20_addresses, settings.TOKENS_ERC20_GET_BALANCES_BATCH
+                erc20_addresses_page, settings.TOKENS_ERC20_GET_BALANCES_BATCH
             ):
                 balances = self.ethereum_client.erc20.get_balances(
                     safe_address, erc20_addresses_chunk
@@ -220,13 +263,16 @@ class BalanceService:
                 raw_balances.extend(balances[1:] if raw_balances else balances)
 
             # Return ether balance if there are no tokens
-            if not raw_balances:
+            if not erc20_addresses_page:
                 raw_balances = self.ethereum_client.erc20.get_balances(safe_address, [])
-            # First element should be the ether transfer
         except (IOError, ValueError) as exc:
             raise NodeConnectionException from exc
 
         balances = []
+        if offset != 0 and raw_balances:
+            # Remove ethereum balance if is not the first page
+            raw_balances = raw_balances[1:]
+
         for balance in raw_balances:
             if not balance["token_address"]:  # Ether
                 balance["token"] = None
@@ -237,7 +283,10 @@ class BalanceService:
             else:
                 continue
             balances.append(Balance(**balance))
-        return balances
+
+        # Add Native token to the list
+        count = erc20_count + 1
+        return balances, count
 
     @cachedmethod(cache=operator.attrgetter("cache_token_info"))
     @cache_memoize(60 * 60, prefix="balances-get_token_info")  # 1 hour
@@ -255,38 +304,3 @@ class BalanceService:
                     "Cannot get erc20 token info for token-address=%s", token_address
                 )
                 return None
-
-    def get_usd_balances(
-        self,
-        safe_address: ChecksumAddress,
-        only_trusted: bool = False,
-        exclude_spam: bool = False,
-    ) -> List[BalanceWithFiat]:
-        """
-        NOTE: PriceService was removed, this function return balances with price 0.
-
-        :param safe_address:
-        :param only_trusted: If True, return balance only for trusted tokens
-        :param exclude_spam: If True, exclude spam tokens
-        :return: List of BalanceWithFiat
-        """
-        balances: List[Balance] = self.get_balances(
-            safe_address, only_trusted, exclude_spam
-        )
-        balances_with_usd = []
-
-        for balance in balances:
-            balances_with_usd.append(
-                BalanceWithFiat(
-                    balance.token_address,
-                    balance.token,
-                    balance.balance,
-                    0.0,
-                    datetime.utcfromtimestamp(0),
-                    0.0,
-                    0.0,
-                    FiatCode.USD.name,
-                )
-            )
-
-        return balances_with_usd

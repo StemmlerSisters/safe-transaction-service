@@ -1,3 +1,4 @@
+import json
 import logging
 from unittest import mock
 from unittest.mock import MagicMock
@@ -11,11 +12,10 @@ from hexbytes import HexBytes
 from rest_framework import status
 from rest_framework.exceptions import ErrorDetail
 from rest_framework.test import APITestCase
-
-from gnosis.eth.eip712 import eip712_encode_hash
-from gnosis.safe.safe_signature import SafeSignatureEOA
-from gnosis.safe.signatures import signature_to_bytes
-from gnosis.safe.tests.safe_test_case import SafeTestCaseMixin
+from safe_eth.eth.eip712 import eip712_encode_hash
+from safe_eth.safe.safe_signature import SafeSignatureEOA
+from safe_eth.safe.signatures import signature_to_bytes
+from safe_eth.safe.tests.safe_test_case import SafeTestCaseMixin
 
 from safe_transaction_service.safe_messages.models import (
     SafeMessage,
@@ -59,6 +59,7 @@ class TestMessageViews(SafeTestCaseMixin, APITestCase):
                 "message": safe_message.message,
                 "proposedBy": safe_message.proposed_by,
                 "safeAppId": safe_message.safe_app_id,
+                "origin": json.dumps(safe_message.origin),
                 "preparedSignature": None,
                 "confirmations": [],
             },
@@ -82,6 +83,7 @@ class TestMessageViews(SafeTestCaseMixin, APITestCase):
                 "message": safe_message.message,
                 "proposedBy": safe_message.proposed_by,
                 "safeAppId": safe_message.safe_app_id,
+                "origin": json.dumps(safe_message.origin),
                 "preparedSignature": safe_message_confirmation.signature.hex(),
                 "confirmations": [
                     {
@@ -118,6 +120,7 @@ class TestMessageViews(SafeTestCaseMixin, APITestCase):
                 "message": safe_message.message,
                 "proposedBy": safe_message.proposed_by,
                 "safeAppId": safe_message.safe_app_id,
+                "origin": json.dumps(safe_message.origin),
                 "preparedSignature": safe_message_confirmation.signature.hex(),
                 "confirmations": [
                     {
@@ -435,6 +438,7 @@ class TestMessageViews(SafeTestCaseMixin, APITestCase):
                         "message": safe_message.message,
                         "proposedBy": safe_message.proposed_by,
                         "safeAppId": safe_message.safe_app_id,
+                        "origin": json.dumps(safe_message.origin),
                         "preparedSignature": None,
                         "confirmations": [],
                     }
@@ -465,6 +469,7 @@ class TestMessageViews(SafeTestCaseMixin, APITestCase):
                         "message": safe_message.message,
                         "proposedBy": safe_message.proposed_by,
                         "safeAppId": safe_message.safe_app_id,
+                        "origin": json.dumps(safe_message.origin),
                         "preparedSignature": safe_message_confirmation.signature.hex(),
                         "confirmations": [
                             {
@@ -512,6 +517,7 @@ class TestMessageViews(SafeTestCaseMixin, APITestCase):
                         "message": safe_message.message,
                         "proposedBy": safe_message.proposed_by,
                         "safeAppId": safe_message.safe_app_id,
+                        "origin": json.dumps(safe_message.origin),
                         "preparedSignature": safe_message_confirmation.signature.hex(),
                         "confirmations": [
                             {
@@ -557,6 +563,7 @@ class TestMessageViews(SafeTestCaseMixin, APITestCase):
                 "message": safe_message.message,
                 "proposedBy": safe_message.proposed_by,
                 "safeAppId": safe_message.safe_app_id,
+                "origin": json.dumps(safe_message.origin),
                 "preparedSignature": None,
                 "confirmations": [],
             },
@@ -580,6 +587,7 @@ class TestMessageViews(SafeTestCaseMixin, APITestCase):
                 "message": safe_message.message,
                 "proposedBy": safe_message.proposed_by,
                 "safeAppId": safe_message.safe_app_id,
+                "origin": json.dumps(safe_message.origin),
                 "preparedSignature": safe_message_confirmation.signature.hex(),
                 "confirmations": [
                     {

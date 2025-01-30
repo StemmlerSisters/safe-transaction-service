@@ -1,7 +1,7 @@
-![Build Status](https://github.com/safe-global/safe-transaction-service/workflows/Python%20CI/badge.svg?branch=main)
+[![CI/CD](https://github.com/safe-global/safe-transaction-service/actions/workflows/python.yml/badge.svg)](https://github.com/safe-global/safe-transaction-service/actions/workflows/python.yml)
 [![Coverage Status](https://coveralls.io/repos/github/safe-global/safe-transaction-service/badge.svg?branch=main)](https://coveralls.io/github/safe-global/safe-transaction-service?branch=main)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://github.com/pre-commit/pre-commit)
-![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)
+![Python 3.13](https://img.shields.io/badge/Python-3.13-blue.svg)
 ![Django 5](https://img.shields.io/badge/Django-5-blue.svg)
 [![Docker Image Version (latest semver)](https://img.shields.io/docker/v/safeglobal/safe-transaction-service?label=Docker&sort=semver)](https://hub.docker.com/r/safeglobal/safe-transaction-service)
 
@@ -24,19 +24,27 @@ a transaction that is pending to be sent to the blockchain.
 - [Deploying the service](https://github.com/safe-global/safe-infrastructure)
 
 ## Setup for development
-Use a virtualenv if possible:
+Use a [virtualenv](https://docs.python.org/es/3/library/venv.html) if possible:
 
 ```bash
 python -m venv venv
 ```
 
-Then enter the virtualenv and install the dependencies:
+Then enter the `virtualenv` and install the dependencies:
 
 ```bash
 source venv/bin/activate
 pip install -r requirements-dev.txt
 pre-commit install -f
 cp .env.dev .env
+./run_tests.sh
+```
+
+To run the e2e tests, some environment variables are required:
+
+```bash
+export ETHEREUM_MAINNET_NODE="https://erigon-node-mainnet.dev/"
+export ETHEREUM_4337_BUNDLER_URL="https://eth-sepolia.g.alchemy.com/v2/$API_KEY"
 ./run_tests.sh
 ```
 
@@ -191,6 +199,9 @@ https://docs.safe.global/api-supported-networks
 
 ### What means banned field in SafeContract model?
 The `banned` field in the `SafeContract` model is used to prevent indexing of certain Safes that have an unsupported `MasterCopy` or unverified proxies that have issues during indexing. This field does not remove the banned Safe and indexing can be resumed once the issue has been resolved.
+
+### Why is my ERC20 token not indexed?
+For an ERC20 token to be indexed it needs to have `name`, `symbol`, `decimals` and `balanceOf()`, otherwise the service will ignore it and add it to the `TokenNotValid` model.
 
 ## Troubleshooting
 
