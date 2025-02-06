@@ -8,9 +8,8 @@ from eth_typing import ChecksumAddress
 from packaging import version as semantic_version
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
-
-from gnosis.eth.django.serializers import EthereumAddressField, HexadecimalField
-from gnosis.safe.safe_signature import SafeSignature, SafeSignatureType
+from safe_eth.eth.django.serializers import EthereumAddressField, HexadecimalField
+from safe_eth.safe.safe_signature import SafeSignature, SafeSignatureType
 
 from safe_transaction_service.history.models import SafeContract, SafeContractDelegate
 from safe_transaction_service.utils.serializers import get_safe_owners
@@ -123,7 +122,7 @@ class FirebaseDeviceSerializer(serializers.Serializer):
                 else:
                     owners_to_not_register.append(owner)
                     # raise ValidationError(f'Owner={owner} is not an owner of any of the safes={data["safes"]}. '
-                    #                       f'Expected hash to sign {hash_to_sign.hex()}')
+                    #                       f'Expected hash to sign {to_0x_hex_str(hash_to_sign)}')
         return owners_to_register, owners_to_not_register
 
     def validate(self, attrs: Dict[str, Any]):

@@ -9,9 +9,9 @@ from django.test import TestCase
 
 from django_celery_beat.models import PeriodicTask
 from eth_account import Account
-
-from gnosis.eth.ethereum_client import EthereumClient, EthereumNetwork
-from gnosis.safe.tests.safe_test_case import SafeTestCaseMixin
+from safe_eth.eth.account_abstraction import BundlerClient
+from safe_eth.eth.ethereum_client import EthereumClient, EthereumNetwork
+from safe_eth.safe.tests.safe_test_case import SafeTestCaseMixin
 
 from ..indexers import Erc20EventsIndexer, InternalTxIndexer, SafeEventsIndexer
 from ..models import (
@@ -86,22 +86,6 @@ class TestCommands(SafeTestCaseMixin, TestCase):
         self.assertIn("Old tasks were removed", buf.getvalue())
         self.assertIn("Created Periodic Task", buf.getvalue())
 
-    def test_add_webhook(self):
-        command = "add_webhook"
-
-        with self.assertRaisesMessage(
-            CommandError, "the following arguments are required: --url"
-        ):
-            call_command(command)
-
-        buf = StringIO()
-        call_command(command, "--url=http://docker-url", stdout=buf)
-        self.assertIn("Created webhook for", buf.getvalue())
-
-        buf = StringIO()
-        call_command(command, "--url=https://test-url.com", stdout=buf)
-        self.assertIn("Created webhook for", buf.getvalue())
-
     def test_index_erc20(self):
         command = "index_erc20"
         buf = StringIO()
@@ -125,10 +109,11 @@ class TestCommands(SafeTestCaseMixin, TestCase):
 
         with self.assertLogs(logger=task_logger) as cm:
             safe_contract = SafeContractFactory()
+            addresses = {safe_contract.address}
             buf = StringIO()
             call_command(command, stdout=buf)
             self.assertIn(
-                f"Start indexing of erc20/721 events for out of sync addresses {[safe_contract.address]}",
+                f"Start indexing of erc20/721 events for out of sync addresses {addresses}",
                 cm.output[0],
             )
             self.assertIn(
@@ -138,10 +123,11 @@ class TestCommands(SafeTestCaseMixin, TestCase):
 
         with self.assertLogs(logger=task_logger) as cm:
             safe_contract_2 = SafeContractFactory()
+            addresses = {safe_contract_2.address}
             buf = StringIO()
             call_command(command, f"--addresses={safe_contract_2.address}", stdout=buf)
             self.assertIn(
-                f"Start indexing of erc20/721 events for out of sync addresses {[safe_contract_2.address]}",
+                f"Start indexing of erc20/721 events for out of sync addresses {addresses}",
                 cm.output[0],
             )
             self.assertIn(
@@ -152,12 +138,13 @@ class TestCommands(SafeTestCaseMixin, TestCase):
         # Test sync task call
         with self.assertLogs(logger=task_logger) as cm:
             safe_contract_2 = SafeContractFactory()
+            addresses = {safe_contract_2.address}
             buf = StringIO()
             call_command(
                 command, f"--addresses={safe_contract_2.address}", "--sync", stdout=buf
             )
             self.assertIn(
-                f"Start indexing of erc20/721 events for out of sync addresses {[safe_contract_2.address]}",
+                f"Start indexing of erc20/721 events for out of sync addresses {addresses}",
                 cm.output[0],
             )
             self.assertIn(
@@ -205,22 +192,23 @@ class TestCommands(SafeTestCaseMixin, TestCase):
                     f"--from-block-number={from_block_number}",
                     stdout=buf,
                 )
+                expected_addresses = {safe_master_copy.address}
                 self.assertIn(
-                    f"Start reindexing addresses {[safe_master_copy.address]}",
+                    f"Start reindexing addresses {expected_addresses}",
                     cm.output[0],
                 )
                 self.assertIn("found 0 traces/events", cm.output[1])
                 self.assertIn(
-                    f"End reindexing addresses {[safe_master_copy.address]}",
+                    f"End reindexing addresses {expected_addresses}",
                     cm.output[3],
                 )
                 find_relevant_elements_mock.assert_any_call(
-                    [safe_master_copy.address],
+                    {safe_master_copy.address},
                     from_block_number,
                     from_block_number + block_process_limit - 1,
                 )
                 find_relevant_elements_mock.assert_any_call(
-                    [safe_master_copy.address],
+                    {safe_master_copy.address},
                     from_block_number + block_process_limit,
                     current_block_number_mock.return_value,
                 )
@@ -247,22 +235,23 @@ class TestCommands(SafeTestCaseMixin, TestCase):
                         f"--from-block-number={from_block_number}",
                         stdout=buf,
                     )
+                    expected_addresses = {safe_l2_master_copy.address}
                     self.assertIn(
-                        f"Start reindexing addresses {[safe_l2_master_copy.address]}",
+                        f"Start reindexing addresses {expected_addresses}",
                         cm.output[0],
                     )
                     self.assertIn("found 0 traces/events", cm.output[1])
                     self.assertIn(
-                        f"End reindexing addresses {[safe_l2_master_copy.address]}",
+                        f"End reindexing addresses {expected_addresses}",
                         cm.output[3],
                     )
                     find_relevant_elements_mock.assert_any_call(
-                        [safe_l2_master_copy.address],
+                        {safe_l2_master_copy.address},
                         from_block_number,
                         from_block_number + block_process_limit - 1,
                     )
                     find_relevant_elements_mock.assert_any_call(
-                        [safe_l2_master_copy.address],
+                        {safe_l2_master_copy.address},
                         from_block_number + block_process_limit,
                         current_block_number_mock.return_value,
                     )
@@ -309,22 +298,23 @@ class TestCommands(SafeTestCaseMixin, TestCase):
                     f"--from-block-number={from_block_number}",
                     stdout=buf,
                 )
+                expected_addresses = {safe_contract.address}
                 self.assertIn(
-                    f"Start reindexing addresses {[safe_contract.address]}",
+                    f"Start reindexing addresses {expected_addresses}",
                     cm.output[0],
                 )
                 self.assertIn("found 0 traces/events", cm.output[1])
                 self.assertIn(
-                    f"End reindexing addresses {[safe_contract.address]}",
+                    f"End reindexing addresses {expected_addresses}",
                     cm.output[3],
                 )
                 find_relevant_elements_mock.assert_any_call(
-                    [safe_contract.address],
+                    {safe_contract.address},
                     from_block_number,
                     from_block_number + block_process_limit - 1,
                 )
                 find_relevant_elements_mock.assert_any_call(
-                    [safe_contract.address],
+                    {safe_contract.address},
                     from_block_number + block_process_limit,
                     current_block_number_mock.return_value,
                 )
@@ -422,9 +412,15 @@ class TestCommands(SafeTestCaseMixin, TestCase):
             self.assertIn("Start exporting of 1", buf.getvalue())
 
     @mock.patch(
+        "safe_transaction_service.history.management.commands.check_chainid_matches.get_bundler_client",
+        return_value=None,
+    )
+    @mock.patch(
         "safe_transaction_service.history.management.commands.check_chainid_matches.get_chain_id"
     )
-    def test_check_chainid_matches(self, get_chain_id_mock: MagicMock):
+    def test_check_chainid_matches(
+        self, get_chain_id_mock: MagicMock, get_bundler_client_mock: MagicMock
+    ):
         command = "check_chainid_matches"
 
         # Create ChainId model
@@ -446,6 +442,36 @@ class TestCommands(SafeTestCaseMixin, TestCase):
         buf = StringIO()
         call_command(command, stdout=buf)
         self.assertIn("EthereumRPC chainId 1 looks good", buf.getvalue())
+
+    @mock.patch.object(BundlerClient, "get_chain_id", return_value=1234)
+    @mock.patch(
+        "safe_transaction_service.history.management.commands.check_chainid_matches.get_bundler_client",
+        return_value=BundlerClient(""),
+    )
+    @mock.patch(
+        "safe_transaction_service.history.management.commands.check_chainid_matches.get_chain_id",
+        return_value=EthereumNetwork.MAINNET.value,
+    )
+    def test_check_chainid_bundler_matches(
+        self,
+        get_chain_id_mock: MagicMock,
+        get_bundler_client_mock: MagicMock,
+        bundler_get_chain_id_mock: MagicMock,
+    ):
+        command = "check_chainid_matches"
+        with self.assertRaisesMessage(
+            CommandError,
+            "ERC4337 BundlerClient chainId 1234 does not match EthereumClient chainId 1",
+        ):
+            call_command(command)
+
+        bundler_get_chain_id_mock.return_value = EthereumNetwork.MAINNET.value
+        buf = StringIO()
+        call_command(command, stdout=buf)
+        self.assertEqual(
+            "EthereumRPC chainId 1 looks good\nERC4337 BundlerClient chainId 1 looks good\n",
+            buf.getvalue(),
+        )
 
     @mock.patch(
         "safe_transaction_service.history.management.commands.check_index_problems.settings.ETH_L2_NETWORK",

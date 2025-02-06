@@ -3,8 +3,7 @@
 from django.db import migrations, models
 
 from hexbytes import HexBytes
-
-from gnosis.safe.safe_signature import (
+from safe_eth.safe.safe_signature import (
     SafeSignature,
     SafeSignatureApprovedHash,
     SafeSignatureType,
@@ -36,7 +35,7 @@ def add_signature_type(apps, schema_editor):
 
     for multisig_tx in MultisigTransaction.objects.exclude(signatures=None):
         for safe_signature in SafeSignature.parse_signature(
-            multisig_tx.signatures.tobytes(), HexBytes(multisig_tx.safe_tx_hash)
+            multisig_tx.signatures, HexBytes(multisig_tx.safe_tx_hash)
         ):
             multisig_confirmation, _ = MultisigConfirmation.objects.get_or_create(
                 multisig_transaction_hash=multisig_tx.safe_tx_hash,

@@ -2,18 +2,18 @@ import logging
 from unittest import mock
 from unittest.mock import MagicMock
 
+from django.core.cache import cache
 from django.urls import reverse
 
 from eth_account import Account
 from rest_framework import status
 from rest_framework.exceptions import ErrorDetail
 from rest_framework.test import APITestCase
-
-from gnosis.eth.ethereum_client import Erc20Manager, InvalidERC20Info
-from gnosis.safe.tests.safe_test_case import SafeTestCaseMixin
+from safe_eth.eth.ethereum_client import Erc20Manager, InvalidERC20Info
+from safe_eth.safe.tests.safe_test_case import SafeTestCaseMixin
 
 from ..models import Token
-from .factories import TokenFactory
+from .factories import TokenFactory, TokenListFactory
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,26 @@ class TestTokenViews(SafeTestCaseMixin, APITestCase):
                     "symbol": token.symbol,
                     "decimals": token.decimals,
                     "trusted": token.trusted,
+                }
+            ],
+        )
+
+    def test_token_lists_view(self):
+        response = self.client.get(reverse("v1:tokens:token-lists"))
+        self.assertEqual(response.data["results"], [])
+        token_list = TokenListFactory()
+        # Check cache
+        self.assertEqual(response.data["results"], [])
+
+        cache.clear()
+
+        response = self.client.get(reverse("v1:tokens:token-lists"))
+        self.assertEqual(
+            response.data["results"],
+            [
+                {
+                    "url": token_list.url,
+                    "description": token_list.description,
                 }
             ],
         )

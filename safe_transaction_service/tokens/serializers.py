@@ -1,10 +1,9 @@
 from enum import Enum
 
 from rest_framework import serializers
+from safe_eth.eth.django.serializers import EthereumAddressField
 
-from gnosis.eth.django.serializers import EthereumAddressField
-
-from .models import Token
+from .models import Token, TokenList
 
 
 class TokenTransferInfoType(Enum):
@@ -38,3 +37,9 @@ class TokenPriceResponseSerializer(serializers.Serializer):
     fiat_code = serializers.CharField()
     fiat_price = serializers.CharField()
     timestamp = serializers.DateTimeField()
+
+
+class TokenListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TokenList
+        fields = ["url", "description"]

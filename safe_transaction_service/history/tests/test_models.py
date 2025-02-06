@@ -1,3 +1,4 @@
+import datetime
 import logging
 from datetime import timedelta
 from unittest import mock
@@ -9,10 +10,10 @@ from django.test import TestCase
 from django.utils import timezone
 
 from eth_account import Account
+from safe_eth.eth.utils import fast_keccak_text
+from safe_eth.safe.safe_signature import SafeSignatureType
 
-from gnosis.eth.utils import fast_keccak_text
-from gnosis.safe.safe_signature import SafeSignatureType
-
+from safe_transaction_service.account_abstraction.tests.mocks import aa_tx_receipt_mock
 from safe_transaction_service.contracts.models import ContractQuerySet
 from safe_transaction_service.contracts.tests.factories import ContractFactory
 
@@ -33,8 +34,8 @@ from ..models import (
     SafeLastStatus,
     SafeMasterCopy,
     SafeStatus,
-    WebHook,
 )
+from ..utils import clean_receipt_log
 from .factories import (
     ERC20TransferFactory,
     ERC721TransferFactory,
@@ -50,10 +51,10 @@ from .factories import (
     SafeLastStatusFactory,
     SafeMasterCopyFactory,
     SafeStatusFactory,
-    WebHookFactory,
 )
 from .mocks.mocks_ethereum_tx import type_0_tx, type_2_tx
 from .mocks.mocks_internal_tx_indexer import block_result
+from .mocks.mocks_safe_creation import multiple_safes_same_tx_creation_mock
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +214,7 @@ class TestMultisigTransaction(TestCase):
         self.assertEqual(multisig_transaction.owners, [])
 
         account = Account.create()
-        multisig_transaction.signatures = account.signHash(
+        multisig_transaction.signatures = account.unsafe_sign_hash(
             multisig_transaction.safe_tx_hash
         )["signature"]
         multisig_transaction.save()
@@ -371,103 +372,39 @@ class TestEthereumTx(TestCase):
 
         # Insert a 4337 transaction
         ethereum_tx = EthereumTxFactory(
-            logs=[
-                {
-                    "data": "0x",
-                    "topics": [
-                        "0xecdf3a3effea5783a3c4c2140e677577666428d44ed9d474a0b3a4c9943f8440",
-                        "0x000000000000000000000000a581c4a4db7175302464ff3c06380bc3270b4037",
-                    ],
-                    "address": "0xB0B5c0578Aa134b0496a6C0e51A7aae47C522861",
-                },
-                {
-                    "data": "0x000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000010000000000000000000000008ecd4ec46d4d2a6b64fe960b3d64e8b94b2234eb000000000000000000000000a581c4a4db7175302464ff3c06380bc3270b403700000000000000000000000000000000000000000000000000000000000000010000000000000000000000005ac255889882acd3da2aa939679e3f3d4cea221e",
-                    "topics": [
-                        "0x141df868a6331af528e38c83b7aa03edc19be66e37ae67f9285bf4f8e3c6a1a8",
-                        "0x0000000000000000000000004e1dcf7ad4e460cfd30791ccc4f9c8a4f820ec67",
-                    ],
-                    "address": "0xB0B5c0578Aa134b0496a6C0e51A7aae47C522861",
-                },
-                {
-                    "data": "0x00000000000000000000000029fcb43b46531bca003ddc8fcb67ffe91900c762",
-                    "topics": [
-                        "0x4f51faf6c4561ff95f067657e43439f0f856d97c04d9ec9070a6199ad418e235",
-                        "0x000000000000000000000000b0b5c0578aa134b0496a6c0e51a7aae47c522861",
-                    ],
-                    "address": "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
-                },
-                {
-                    "data": "0x0000000000000000000000004e1dcf7ad4e460cfd30791ccc4f9c8a4f820ec670000000000000000000000000000000000000000000000000000000000000000",
-                    "topics": [
-                        "0xd51a9c61267aa6196961883ecf5ff2da6619c37dac0fa92122513fb32c032d2d",
-                        "0x39b3e2171c04539d9b3f848d04364dfaa42cc0b412ff65ce2a85c566cf8bf281",
-                        "0x000000000000000000000000b0b5c0578aa134b0496a6c0e51a7aae47c522861",
-                    ],
-                    "address": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
-                },
-                {
-                    "data": "0x000000000000000000000000a581c4a4db7175302464ff3c06380bc3270b40370000000000000000000000005ff137d4b0fdcd49dca30c7cf57e578a026d27890000000000000000000000000000000000000000000000000002b32962c0bb8400000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-                    "topics": [
-                        "0xb648d3644f584ed1c2232d53c46d87e693586486ad0d1175f8656013110b714e"
-                    ],
-                    "address": "0xB0B5c0578Aa134b0496a6C0e51A7aae47C522861",
-                },
-                {
-                    "data": "0x0000000000000000000000000000000000000000000000000002b32962c0bb84",
-                    "topics": [
-                        "0x2da466a7b24304f47e87fa2e1e5a81b9831ce54fec19055ce277ca2f39ba42c4",
-                        "0x000000000000000000000000b0b5c0578aa134b0496a6c0e51a7aae47c522861",
-                    ],
-                    "address": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
-                },
-                {
-                    "data": "0x",
-                    "topics": [
-                        "0x6895c13664aa4f67288b25d7a21d7aaa34916e355fb9b6fae0a139a9085becb8",
-                        "0x000000000000000000000000a581c4a4db7175302464ff3c06380bc3270b4037",
-                    ],
-                    "address": "0xB0B5c0578Aa134b0496a6C0e51A7aae47C522861",
-                },
-                {
-                    "data": "0x",
-                    "topics": [
-                        "0xbb47ee3e183a558b1a2ff0874b079f3fc5478b7454eacf2bfc5af2ff5878f972"
-                    ],
-                    "address": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
-                },
-                {
-                    "data": "0x000000000000000000000000a581c4a4db7175302464ff3c06380bc3270b403700000000000000000000000002270bd144e70ce6963ba02f575776a16184e1e600000000000000000000000000000000000000000000000000005af3107a400000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-                    "topics": [
-                        "0xb648d3644f584ed1c2232d53c46d87e693586486ad0d1175f8656013110b714e"
-                    ],
-                    "address": "0xB0B5c0578Aa134b0496a6C0e51A7aae47C522861",
-                },
-                {
-                    "data": "0x",
-                    "topics": [
-                        "0x6895c13664aa4f67288b25d7a21d7aaa34916e355fb9b6fae0a139a9085becb8",
-                        "0x000000000000000000000000a581c4a4db7175302464ff3c06380bc3270b4037",
-                    ],
-                    "address": "0xB0B5c0578Aa134b0496a6C0e51A7aae47C522861",
-                },
-                {
-                    "data": "0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000001c7f432341e240000000000000000000000000000000000000000000000000000000000068072",
-                    "topics": [
-                        "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f",
-                        "0x39b3e2171c04539d9b3f848d04364dfaa42cc0b412ff65ce2a85c566cf8bf281",
-                        "0x000000000000000000000000b0b5c0578aa134b0496a6c0e51a7aae47c522861",
-                        "0x0000000000000000000000000000000000000000000000000000000000000000",
-                    ],
-                    "address": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
-                },
-            ]
+            logs=[clean_receipt_log(log) for log in aa_tx_receipt_mock["logs"]]
         )
         ethereum_txs = EthereumTx.objects.account_abstraction_txs()
         self.assertEqual(len(ethereum_txs), 1)
         self.assertEqual(ethereum_txs[0], ethereum_tx)
 
+    def test_get_deployed_proxies_from_logs(self):
+        ethereum_tx = EthereumTxFactory(
+            logs=[
+                clean_receipt_log(log)
+                for log in multiple_safes_same_tx_creation_mock["tx_logs"]
+            ]
+        )
+        self.assertEqual(
+            ethereum_tx.get_deployed_proxies_from_logs(),
+            multiple_safes_same_tx_creation_mock["proxies_deployed"],
+        )
+
 
 class TestTokenTransfer(TestCase):
+    def test_fast_count(self):
+        address = Account.create().address
+
+        ERC20TransferFactory(to=address)
+        self.assertEqual(ERC20Transfer.objects.fast_count(address), 1)
+
+        ERC20TransferFactory(_from=address)
+        self.assertEqual(ERC20Transfer.objects.fast_count(address), 2)
+
+        # Optimization uses a UNION, so it counts transfers with `from=to` twice
+        ERC20TransferFactory(_from=address, to=address)
+        self.assertEqual(ERC20Transfer.objects.fast_count(address), 4)
+
     def test_transfer_to_erc721(self):
         erc20_transfer = ERC20TransferFactory()
         self.assertEqual(ERC721Transfer.objects.count(), 0)
@@ -499,9 +436,9 @@ class TestTokenTransfer(TestCase):
         ERC20TransferFactory()  # This event should not appear
         self.assertEqual(ERC20Transfer.objects.to_or_from(safe_address).count(), 2)
 
-        self.assertSetEqual(
+        self.assertCountEqual(
             ERC20Transfer.objects.tokens_used_by_address(safe_address),
-            {e1.address, e2.address},
+            [e1.address, e2.address],
         )
 
     def test_erc721_events(self):
@@ -511,9 +448,9 @@ class TestTokenTransfer(TestCase):
         ERC721TransferFactory()  # This event should not appear
         self.assertEqual(ERC721Transfer.objects.to_or_from(safe_address).count(), 2)
 
-        self.assertSetEqual(
+        self.assertCountEqual(
             ERC721Transfer.objects.tokens_used_by_address(safe_address),
-            {e1.address, e2.address},
+            [e1.address, e2.address],
         )
 
     def test_incoming_tokens(self):
@@ -1171,6 +1108,31 @@ class TestSafeContractDelegate(TestCase):
             [safe_contract_delegate_another_safe, safe_contract_delegate_without_safe],
         )
 
+        # Check expired delegate
+        safe_contract_delegate_expired = SafeContractDelegateFactory(
+            expiry_date=timezone.now() - datetime.timedelta(hours=1)
+        )
+        safe_contract_delegate_not_expired = SafeContractDelegateFactory(
+            safe_contract=safe_contract_delegate_expired.safe_contract
+        )
+        safe_contract_delegate_not_expired_2 = SafeContractDelegateFactory(
+            safe_contract=safe_contract_delegate_expired.safe_contract
+        )
+        expired_delegate_safe_address = (
+            safe_contract_delegate_expired.safe_contract.address
+        )
+        self.assertCountEqual(
+            SafeContractDelegate.objects.get_for_safe(
+                expired_delegate_safe_address,
+                [
+                    safe_contract_delegate_expired.delegator,
+                    safe_contract_delegate_not_expired.delegator,
+                    safe_contract_delegate_not_expired_2.delegator,
+                ],
+            ),
+            [safe_contract_delegate_not_expired, safe_contract_delegate_not_expired_2],
+        )
+
     def test_get_for_safe_and_delegate(self):
         delegator = Account.create().address
         delegate = Account.create().address
@@ -1627,25 +1589,57 @@ class TestMultisigTransactions(TestCase):
     def test_with_confirmations_required(self):
         # This should never be picked, Safe not matching
         SafeStatusFactory(nonce=0, threshold=4)
-
         multisig_transaction = MultisigTransactionFactory(nonce=0)
-        self.assertIsNone(
+        safe_address = multisig_transaction.safe
+
+        self.assertEqual(
             MultisigTransaction.objects.with_confirmations_required()
             .first()
-            .confirmations_required
+            .confirmations_required,
+            0,
         )
 
         # SafeStatus not matching the nonce (looking for threshold in nonce=0)
-        safe_status = SafeStatusFactory(
-            address=multisig_transaction.safe, nonce=1, threshold=8
-        )
-        self.assertIsNone(
+        safe_status = SafeStatusFactory(address=safe_address, nonce=1, threshold=8)
+        self.assertEqual(
             MultisigTransaction.objects.with_confirmations_required()
             .first()
-            .confirmations_required
+            .confirmations_required,
+            0,
         )
 
-        safe_status.nonce = 0
+        # Add confirmations. Without SafeStatus, confirmations for the transaction are used
+        number_confirmations = 5
+        for _ in range(number_confirmations):
+            MultisigConfirmationFactory(multisig_transaction=multisig_transaction)
+
+        self.assertEqual(
+            MultisigTransaction.objects.with_confirmations_required()
+            .first()
+            .confirmations_required,
+            number_confirmations,
+        )
+
+        # If there's SafeLastStatus present, it should be returned
+        # Not matching SafeLastStatus should return the number of confirmations
+        SafeLastStatusFactory(nonce=2, threshold=16)
+        self.assertEqual(
+            MultisigTransaction.objects.with_confirmations_required()
+            .first()
+            .confirmations_required,
+            number_confirmations,
+        )
+
+        SafeLastStatusFactory(address=safe_address, nonce=2, threshold=15)
+        self.assertEqual(
+            MultisigTransaction.objects.with_confirmations_required()
+            .first()
+            .confirmations_required,
+            15,
+        )
+
+        # Update SafeStatus to match the Multisig Tx nonce
+        safe_status.nonce = multisig_transaction.nonce
         safe_status.save(update_fields=["nonce"])
 
         self.assertEqual(
@@ -1656,7 +1650,7 @@ class TestMultisigTransactions(TestCase):
         )
 
         # It will not be picked, as nonce is still matching the previous SafeStatus
-        SafeStatusFactory(address=multisig_transaction.safe, nonce=1, threshold=15)
+        new_safe_status = SafeStatusFactory(address=safe_address, nonce=1, threshold=15)
         self.assertEqual(
             MultisigTransaction.objects.with_confirmations_required()
             .first()
@@ -1664,33 +1658,8 @@ class TestMultisigTransactions(TestCase):
             8,
         )
 
-        multisig_transaction.nonce = 1
+        multisig_transaction.nonce = new_safe_status.nonce
         multisig_transaction.save(update_fields=["nonce"])
-        self.assertEqual(
-            MultisigTransaction.objects.with_confirmations_required()
-            .first()
-            .confirmations_required,
-            15,
-        )
-
-        # As EthereumTx is empty, the latest Safe Status will be used if available
-        multisig_transaction.ethereum_tx = None
-        multisig_transaction.save(update_fields=["ethereum_tx"])
-        self.assertIsNone(
-            MultisigTransaction.objects.with_confirmations_required()
-            .first()
-            .confirmations_required
-        )
-
-        # Not matching address should not return anything
-        SafeLastStatusFactory(nonce=2, threshold=16)
-        self.assertIsNone(
-            MultisigTransaction.objects.with_confirmations_required()
-            .first()
-            .confirmations_required
-        )
-
-        SafeLastStatusFactory(address=multisig_transaction.safe, nonce=2, threshold=15)
         self.assertEqual(
             MultisigTransaction.objects.with_confirmations_required()
             .first()
@@ -1744,67 +1713,3 @@ class TestMultisigTransactions(TestCase):
             MultisigTransaction.objects.last_valid_transaction(safe_address),
             multisig_transaction_2,
         )
-
-
-class TestWebHook(TestCase):
-    def test_matching_for_address(self):
-        addresses = [Account.create().address for _ in range(3)]
-        webhook_0 = WebHookFactory(address=addresses[0])
-        webhook_1 = WebHookFactory(address=addresses[1])
-
-        self.assertCountEqual(
-            WebHook.objects.matching_for_address(addresses[0]), [webhook_0]
-        )
-        self.assertCountEqual(
-            WebHook.objects.matching_for_address(addresses[1]), [webhook_1]
-        )
-
-        webhook_2 = WebHookFactory(address=None)
-        self.assertCountEqual(
-            WebHook.objects.matching_for_address(addresses[0]), [webhook_0, webhook_2]
-        )
-        self.assertCountEqual(
-            WebHook.objects.matching_for_address(addresses[1]), [webhook_1, webhook_2]
-        )
-        self.assertCountEqual(
-            WebHook.objects.matching_for_address(addresses[2]), [webhook_2]
-        )
-
-    def test_optional_auth(self):
-        web_hook = WebHookFactory.create(authorization=None)
-
-        web_hook.full_clean()
-
-    def test_invalid_urls(self) -> None:
-        param_list = [
-            "foo://bar",
-            "foo",
-            "://",
-        ]
-        for invalid_url in param_list:
-            with self.subTest(msg=f"{invalid_url} is not a valid url"):
-                with self.assertRaises(ValidationError):
-                    web_hook = WebHookFactory.create(url=invalid_url)
-                    web_hook.full_clean()
-
-            with self.subTest(msg=f"{invalid_url} is not a valid url"):
-                with self.assertRaises(ValidationError):
-                    web_hook = WebHookFactory.create(url=invalid_url)
-                    web_hook.full_clean()
-
-    def test_valid_urls(self) -> None:
-        param_list = [
-            "http://tx-service",
-            "https://tx-service",
-            "https://tx-service:8000",
-            "https://safe-transaction.mainnet.gnosis.io",
-            "http://mainnet-safe-transaction-web.safe.svc.cluster.local",
-        ]
-        for valid_url in param_list:
-            with self.subTest(msg=f"Valid url {valid_url} should not throw"):
-                web_hook = WebHookFactory.create(url=valid_url)
-                web_hook.full_clean()
-
-            with self.subTest(msg=f"Valid url {valid_url} should not throw"):
-                web_hook = WebHookFactory.create(url=valid_url)
-                web_hook.full_clean()

@@ -12,11 +12,10 @@ from hexbytes import HexBytes
 from rest_framework import status
 from rest_framework.exceptions import ErrorDetail
 from rest_framework.test import APITestCase
-
-from gnosis.eth import EthereumClient
-from gnosis.eth.account_abstraction import UserOperation as UserOperationClass
-from gnosis.eth.constants import NULL_ADDRESS
-from gnosis.eth.tests.mocks.mock_bundler import (
+from safe_eth.eth import EthereumClient
+from safe_eth.eth.account_abstraction import UserOperation as UserOperationClass
+from safe_eth.eth.constants import NULL_ADDRESS
+from safe_eth.eth.tests.mocks.mock_bundler import (
     safe_4337_address,
     safe_4337_chain_id_mock,
     safe_4337_module_address_mock,
@@ -24,16 +23,17 @@ from gnosis.eth.tests.mocks.mock_bundler import (
     safe_4337_user_operation_hash_mock,
     user_operation_mock,
 )
-from gnosis.eth.utils import fast_to_checksum_address
-from gnosis.safe.account_abstraction import SafeOperation as SafeOperationClass
-from gnosis.safe.proxy_factory import ProxyFactoryV141
-from gnosis.safe.safe_signature import SafeSignatureEOA
-from gnosis.safe.tests.safe_test_case import SafeTestCaseMixin
+from safe_eth.eth.utils import fast_keccak, fast_to_checksum_address
+from safe_eth.safe.account_abstraction import SafeOperation as SafeOperationClass
+from safe_eth.safe.proxy_factory import ProxyFactoryV141
+from safe_eth.safe.safe_signature import SafeSignatureEOA, SafeSignatureType
+from safe_eth.safe.tests.safe_test_case import SafeTestCaseMixin
+from safe_eth.util.util import to_0x_hex_str
 
 from safe_transaction_service.utils.utils import datetime_to_str
 
 from .. import models
-from ..serializers import SafeOperationSerializer
+from ..serializers import SafeOperationConfirmationSerializer, SafeOperationSerializer
 from . import factories
 
 logger = logging.getLogger(__name__)
@@ -67,27 +67,35 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
         expected = {
             "created": datetime_to_str(safe_operation.created),
             "modified": datetime_to_str(safe_operation.modified),
-            "sender": safe_operation.user_operation.sender,
-            "nonce": safe_operation.user_operation.nonce,
-            "userOperationHash": safe_operation.user_operation.hash,
             "safeOperationHash": safe_operation.hash,
-            "ethereumTxHash": safe_operation.user_operation.ethereum_tx_id,
-            "initCode": "0x",
-            "callData": "0x",
-            "callDataGasLimit": safe_operation.user_operation.call_data_gas_limit,
-            "verificationGasLimit": safe_operation.user_operation.verification_gas_limit,
-            "preVerificationGas": safe_operation.user_operation.pre_verification_gas,
-            "maxFeePerGas": safe_operation.user_operation.max_fee_per_gas,
-            "maxPriorityFeePerGas": safe_operation.user_operation.max_priority_fee_per_gas,
-            "paymaster": NULL_ADDRESS,
-            "paymasterData": "0x",
-            "signature": "0x",
-            "entryPoint": safe_operation.user_operation.entry_point,
+            "userOperation": {
+                "sender": safe_operation.user_operation.sender,
+                "nonce": str(safe_operation.user_operation.nonce),
+                "userOperationHash": safe_operation.user_operation.hash,
+                "ethereumTxHash": safe_operation.user_operation.ethereum_tx_id,
+                "initCode": "0x",
+                "callData": "0x",
+                "callGasLimit": str(safe_operation.user_operation.call_gas_limit),
+                "verificationGasLimit": str(
+                    safe_operation.user_operation.verification_gas_limit
+                ),
+                "preVerificationGas": str(
+                    safe_operation.user_operation.pre_verification_gas
+                ),
+                "maxFeePerGas": str(safe_operation.user_operation.max_fee_per_gas),
+                "maxPriorityFeePerGas": str(
+                    safe_operation.user_operation.max_priority_fee_per_gas
+                ),
+                "paymaster": NULL_ADDRESS,
+                "paymasterData": "0x",
+                "entryPoint": safe_operation.user_operation.entry_point,
+                "signature": "0x" + "0" * 24,
+            },
             "validAfter": datetime_to_str(safe_operation.valid_after),
             "validUntil": datetime_to_str(safe_operation.valid_until),
             "moduleAddress": safe_operation.module_address,
             "confirmations": [],
-            "preparedSignature": None,
+            "preparedSignature": to_0x_hex_str(safe_operation.build_signature_prefix()),
         }
         self.assertDictEqual(
             response.json(),
@@ -104,17 +112,19 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
             )
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        expected["preparedSignature"] = safe_operation_confirmation.signature.hex()
+        expected["preparedSignature"] = to_0x_hex_str(
+            safe_operation.build_signature_prefix()
+            + safe_operation_confirmation.signature
+        )
         expected["confirmations"] = [
             {
                 "created": datetime_to_str(safe_operation_confirmation.created),
                 "modified": datetime_to_str(safe_operation_confirmation.modified),
                 "owner": safe_operation_confirmation.owner,
-                "signature": safe_operation_confirmation.signature.hex(),
+                "signature": to_0x_hex_str(safe_operation_confirmation.signature),
                 "signatureType": "EOA",
             }
         ]
-        self.maxDiff = None
         self.assertDictEqual(response.json(), expected)
 
     def test_safe_operations_view(self):
@@ -140,31 +150,49 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
         expected = {
             "created": datetime_to_str(safe_operation.created),
             "modified": datetime_to_str(safe_operation.modified),
-            "sender": safe_operation.user_operation.sender,
-            "nonce": safe_operation.user_operation.nonce,
-            "userOperationHash": safe_operation.user_operation.hash,
             "safeOperationHash": safe_operation.hash,
-            "ethereumTxHash": safe_operation.user_operation.ethereum_tx_id,
-            "initCode": "0x",
-            "callData": "0x",
-            "callDataGasLimit": safe_operation.user_operation.call_data_gas_limit,
-            "verificationGasLimit": safe_operation.user_operation.verification_gas_limit,
-            "preVerificationGas": safe_operation.user_operation.pre_verification_gas,
-            "maxFeePerGas": safe_operation.user_operation.max_fee_per_gas,
-            "maxPriorityFeePerGas": safe_operation.user_operation.max_priority_fee_per_gas,
-            "paymaster": NULL_ADDRESS,
-            "paymasterData": "0x",
-            "signature": "0x",
-            "entryPoint": safe_operation.user_operation.entry_point,
+            "userOperation": {
+                "sender": safe_operation.user_operation.sender,
+                "nonce": str(safe_operation.user_operation.nonce),
+                "userOperationHash": safe_operation.user_operation.hash,
+                "ethereumTxHash": safe_operation.user_operation.ethereum_tx_id,
+                "initCode": "0x",
+                "callData": "0x",
+                "callGasLimit": str(safe_operation.user_operation.call_gas_limit),
+                "verificationGasLimit": str(
+                    safe_operation.user_operation.verification_gas_limit
+                ),
+                "preVerificationGas": str(
+                    safe_operation.user_operation.pre_verification_gas
+                ),
+                "maxFeePerGas": str(safe_operation.user_operation.max_fee_per_gas),
+                "maxPriorityFeePerGas": str(
+                    safe_operation.user_operation.max_priority_fee_per_gas
+                ),
+                "paymaster": NULL_ADDRESS,
+                "paymasterData": "0x",
+                "signature": "0x" + "0" * 24,
+                "entryPoint": safe_operation.user_operation.entry_point,
+            },
             "validAfter": datetime_to_str(safe_operation.valid_after),
             "validUntil": datetime_to_str(safe_operation.valid_until),
             "moduleAddress": safe_operation.module_address,
             "confirmations": [],
-            "preparedSignature": None,
+            "preparedSignature": to_0x_hex_str(safe_operation.build_signature_prefix()),
         }
         self.assertDictEqual(
             response.json(),
             {"count": 1, "next": None, "previous": None, "results": [expected]},
+        )
+
+        # Check confirmations flag
+        response = self.client.get(
+            reverse("v1:account_abstraction:safe-operations", args=(safe_address,))
+            + "?has_confirmations=True"
+        )
+        self.assertDictEqual(
+            response.json(),
+            {"count": 0, "next": None, "previous": None, "results": []},
         )
 
         # Add a confirmation
@@ -175,16 +203,60 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
             reverse("v1:account_abstraction:safe-operations", args=(safe_address,))
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        expected["preparedSignature"] = safe_operation_confirmation.signature.hex()
+        expected["preparedSignature"] = to_0x_hex_str(
+            safe_operation.build_signature_prefix()
+            + safe_operation_confirmation.signature
+        )
         expected["confirmations"] = [
             {
                 "created": datetime_to_str(safe_operation_confirmation.created),
                 "modified": datetime_to_str(safe_operation_confirmation.modified),
                 "owner": safe_operation_confirmation.owner,
-                "signature": safe_operation_confirmation.signature.hex(),
+                "signature": to_0x_hex_str(safe_operation_confirmation.signature),
                 "signatureType": "EOA",
             }
         ]
+        self.assertDictEqual(
+            response.json(),
+            {"count": 1, "next": None, "previous": None, "results": [expected]},
+        )
+
+        # Check executed flag
+        response = self.client.get(
+            reverse("v1:account_abstraction:safe-operations", args=(safe_address,))
+            + "?executed=False"
+        )
+        self.assertDictEqual(
+            response.json(),
+            {"count": 0, "next": None, "previous": None, "results": []},
+        )
+
+        response = self.client.get(
+            reverse("v1:account_abstraction:safe-operations", args=(safe_address,))
+            + "?executed=True"
+        )
+        self.assertDictEqual(
+            response.json(),
+            {"count": 1, "next": None, "previous": None, "results": [expected]},
+        )
+
+        # Set transaction as not executed and check again
+        safe_operation.user_operation.ethereum_tx = None
+        safe_operation.user_operation.save(update_fields=["ethereum_tx"])
+        response = self.client.get(
+            reverse("v1:account_abstraction:safe-operations", args=(safe_address,))
+            + "?executed=True"
+        )
+        self.assertDictEqual(
+            response.json(),
+            {"count": 0, "next": None, "previous": None, "results": []},
+        )
+
+        response = self.client.get(
+            reverse("v1:account_abstraction:safe-operations", args=(safe_address,))
+            + "?executed=False"
+        )
+        expected["userOperation"]["ethereumTxHash"] = None
         self.assertDictEqual(
             response.json(),
             {"count": 1, "next": None, "previous": None, "results": [expected]},
@@ -204,13 +276,12 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
     def test_safe_operation_create_view(
         self, get_chain_id_mock: MagicMock, get_owners_mock: MagicMock
     ):
-        self.maxDiff = None
         account = Account.create()
         safe_address = safe_4337_address
         user_operation_hash = safe_4337_user_operation_hash_mock
 
         user_operation = UserOperationClass.from_bundler_response(
-            user_operation_hash.hex(), user_operation_mock["result"]
+            to_0x_hex_str(user_operation_hash), user_operation_mock["result"]
         )
 
         safe_operation = SafeOperationClass.from_user_operation(user_operation)
@@ -223,13 +294,15 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
             ),
         )
 
-        signature = account.signHash(safe_operation_hash)["signature"].hex()
+        signature = to_0x_hex_str(
+            account.unsafe_sign_hash(safe_operation_hash)["signature"]
+        )
         get_owners_mock.return_value = []
         data = {
             "nonce": safe_operation.nonce,
-            "init_code": user_operation.init_code.hex(),
-            "call_data": user_operation.call_data.hex(),
-            "call_data_gas_limit": user_operation.call_gas_limit,
+            "init_code": to_0x_hex_str(user_operation.init_code),
+            "call_data": to_0x_hex_str(user_operation.call_data),
+            "call_gas_limit": user_operation.call_gas_limit,
             "verification_gas_limit": user_operation.verification_gas_limit,
             "pre_verification_gas": user_operation.pre_verification_gas,
             "max_fee_per_gas": user_operation.max_fee_per_gas,
@@ -265,7 +338,7 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
             {
                 "non_field_errors": [
                     ErrorDetail(
-                        string=f"Signer={account.address} is not an owner. Current owners=[]. Safe-operation-hash={safe_operation_hash.hex()}",
+                        string=f"Signer={account.address} is not an owner. Current owners=[]. Safe-operation-hash={to_0x_hex_str(safe_operation_hash)}",
                         code="invalid",
                     )
                 ]
@@ -281,7 +354,6 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
                 data=data,
             )
             self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-            self.maxDiff = None
             self.assertDictEqual(
                 response.data,
                 {
@@ -372,10 +444,10 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
         # Receipt will only be created when Operation is indexed
         self.assertEqual(models.UserOperationReceipt.objects.count(), 0)
         self.assertEqual(
-            models.UserOperation.objects.get().hash, user_operation_hash.hex()
+            models.UserOperation.objects.get().hash, to_0x_hex_str(user_operation_hash)
         )
         self.assertEqual(
-            models.SafeOperation.objects.get().hash, safe_operation_hash.hex()
+            models.SafeOperation.objects.get().hash, to_0x_hex_str(safe_operation_hash)
         )
 
         # Try to create the same transaction
@@ -390,7 +462,7 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
             {
                 "non_field_errors": [
                     ErrorDetail(
-                        string=f"SafeOperation with hash={safe_operation_hash.hex()} already exists",
+                        string=f"SafeOperation with hash={to_0x_hex_str(safe_operation_hash)} already exists",
                         code="invalid",
                     )
                 ]
@@ -444,7 +516,7 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
         user_operation_hash = safe_4337_user_operation_hash_mock
 
         user_operation = UserOperationClass.from_bundler_response(
-            user_operation_hash.hex(), user_operation_mock["result"]
+            to_0x_hex_str(user_operation_hash), user_operation_mock["result"]
         )
 
         safe_operation = SafeOperationClass.from_user_operation(user_operation)
@@ -457,12 +529,14 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
             ),
         )
 
-        signature = account.signHash(safe_operation_hash)["signature"].hex()
+        signature = to_0x_hex_str(
+            account.unsafe_sign_hash(safe_operation_hash)["signature"]
+        )
         data = {
             "nonce": safe_operation.nonce,
-            "init_code": user_operation.init_code.hex(),
-            "call_data": user_operation.call_data.hex(),
-            "call_data_gas_limit": user_operation.call_gas_limit,
+            "init_code": to_0x_hex_str(user_operation.init_code),
+            "call_data": to_0x_hex_str(user_operation.call_data),
+            "call_gas_limit": user_operation.call_gas_limit,
             "verification_gas_limit": user_operation.verification_gas_limit,
             "pre_verification_gas": user_operation.pre_verification_gas,
             "max_fee_per_gas": user_operation.max_fee_per_gas,
@@ -510,7 +584,9 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
         safe_operation_hash = new_safe_operation.get_safe_operation_hash(
             safe_4337_chain_id_mock, safe_4337_module_address_mock
         )
-        data["signature"] = account.signHash(safe_operation_hash)["signature"].hex()
+        data["signature"] = to_0x_hex_str(
+            account.unsafe_sign_hash(safe_operation_hash)["signature"]
+        )
         response = self.client.post(
             reverse("v1:account_abstraction:safe-operations", args=(safe_address,)),
             format="json",
@@ -545,7 +621,7 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
         paymaster_and_data = HexBytes(paymaster_address)
         user_operation = dataclasses.replace(
             UserOperationClass.from_bundler_response(
-                user_operation_hash.hex(), user_operation_mock["result"]
+                user_operation_hash, user_operation_mock["result"]
             ),
             paymaster_and_data=paymaster_and_data,
         )
@@ -555,12 +631,14 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
             safe_4337_chain_id_mock, safe_4337_module_address_mock
         )
 
-        signature = account.signHash(safe_operation_hash)["signature"].hex()
+        signature = to_0x_hex_str(
+            account.unsafe_sign_hash(safe_operation_hash)["signature"]
+        )
         data = {
             "nonce": safe_operation.nonce,
-            "init_code": user_operation.init_code.hex(),
-            "call_data": user_operation.call_data.hex(),
-            "call_data_gas_limit": user_operation.call_gas_limit,
+            "init_code": to_0x_hex_str(user_operation.init_code),
+            "call_data": to_0x_hex_str(user_operation.call_data),
+            "call_gas_limit": user_operation.call_gas_limit,
             "verification_gas_limit": user_operation.verification_gas_limit,
             "pre_verification_gas": user_operation.pre_verification_gas,
             "max_fee_per_gas": user_operation.max_fee_per_gas,
@@ -600,7 +678,7 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
         )
 
         # Set valid paymaster_and_data
-        data["paymaster_and_data"] = paymaster_and_data.hex()
+        data["paymaster_and_data"] = to_0x_hex_str(paymaster_and_data)
         response = self.client.post(
             reverse("v1:account_abstraction:safe-operations", args=(safe_address,)),
             format="json",
@@ -638,3 +716,304 @@ class TestAccountAbstractionViews(SafeTestCaseMixin, APITestCase):
                     mock.call(paymaster_address),
                 ],
             )
+
+    def test_safe_operation_confirmations_get_view(self):
+        endpoint = "v1:account_abstraction:safe-operation-confirmations"
+        random_hash = HexBytes(fast_keccak(b""))
+        response = self.client.get(
+            reverse(
+                endpoint,
+                args=(to_0x_hex_str(random_hash),),
+            )
+        )
+        expected_empty = {"count": 0, "next": None, "previous": None, "results": []}
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertDictEqual(response.data, expected_empty)
+
+        safe_operation = factories.SafeOperationFactory()
+        response = self.client.get(
+            reverse(
+                endpoint,
+                args=(safe_operation.hash,),
+            )
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertDictEqual(response.data, expected_empty)
+
+        # Create a random confirmation, it should not appear
+        factories.SafeOperationConfirmationFactory()
+        response = self.client.get(
+            reverse(
+                endpoint,
+                args=(safe_operation.hash,),
+            )
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertDictEqual(response.data, expected_empty)
+
+        # Create a confirmation for the SafeOperation
+        safe_operation_confirmation = factories.SafeOperationConfirmationFactory(
+            safe_operation=safe_operation
+        )
+        response = self.client.get(
+            reverse(
+                endpoint,
+                args=(safe_operation.hash,),
+            )
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        expected = {
+            "count": 1,
+            "next": None,
+            "previous": None,
+            "results": [
+                {
+                    "created": datetime_to_str(safe_operation_confirmation.created),
+                    "modified": datetime_to_str(safe_operation_confirmation.modified),
+                    "owner": safe_operation_confirmation.owner,
+                    "signature": to_0x_hex_str(safe_operation_confirmation.signature),
+                    "signature_type": SafeSignatureType(
+                        safe_operation_confirmation.signature_type
+                    ).name,
+                }
+            ],
+        }
+        self.assertDictEqual(response.data, expected)
+
+    @mock.patch.object(
+        SafeOperationConfirmationSerializer,
+        "_get_owners",
+    )
+    def test_safe_operation_confirmations_post_view(self, get_owners_mock: MagicMock):
+        endpoint = "v1:account_abstraction:safe-operation-confirmations"
+        random_hash = HexBytes(fast_keccak(b""))
+        owner_1 = Account.create()
+        owner_2 = Account.create()
+        get_owners_mock.return_value = [owner_1.address, owner_2.address]
+
+        data = {
+            "signature": to_0x_hex_str(
+                owner_1.unsafe_sign_hash(random_hash)["signature"]
+            )
+        }
+        response = self.client.post(
+            reverse(
+                endpoint,
+                args=(to_0x_hex_str(random_hash),),
+            ),
+            format="json",
+            data=data,
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertDictEqual(
+            response.data,
+            {
+                "non_field_errors": [
+                    ErrorDetail(
+                        string=f"SafeOperation with hash={to_0x_hex_str(random_hash)} does not exist",
+                        code="invalid",
+                    )
+                ]
+            },
+        )
+
+        safe_operation = factories.SafeOperationFactory()
+
+        # Check no confirmation exists
+        self.assertEqual(models.SafeOperationConfirmation.objects.all().count(), 0)
+        # Add confirmation for owner_1
+        data = {
+            "signature": to_0x_hex_str(
+                owner_1.unsafe_sign_hash(safe_operation.hash)["signature"]
+            )
+        }
+        response = self.client.post(
+            reverse(
+                endpoint,
+                args=(safe_operation.hash,),
+            ),
+            format="json",
+            data=data,
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(models.SafeOperationConfirmation.objects.all().count(), 1)
+        safe_operation_confirmation_1 = models.SafeOperationConfirmation.objects.get(
+            owner=owner_1.address
+        )
+        self.assertEqual(safe_operation_confirmation_1.safe_operation, safe_operation)
+
+        # Add confirmation for owner_2
+        data = {
+            "signature": to_0x_hex_str(
+                owner_2.unsafe_sign_hash(safe_operation.hash)["signature"]
+            )
+        }
+        response = self.client.post(
+            reverse(
+                endpoint,
+                args=(safe_operation.hash,),
+            ),
+            format="json",
+            data=data,
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(models.SafeOperationConfirmation.objects.all().count(), 2)
+        safe_operation_confirmation_2 = models.SafeOperationConfirmation.objects.get(
+            owner=owner_2.address
+        )
+        self.assertEqual(safe_operation_confirmation_2.safe_operation, safe_operation)
+
+        # Try to add confirmation for random owner
+        random_owner = Account.create()
+        data = {
+            "signature": to_0x_hex_str(
+                random_owner.unsafe_sign_hash(safe_operation.hash)["signature"]
+            )
+        }
+        response = self.client.post(
+            reverse(
+                endpoint,
+                args=(safe_operation.hash,),
+            ),
+            format="json",
+            data=data,
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertDictEqual(
+            response.data,
+            {
+                "non_field_errors": [
+                    ErrorDetail(
+                        string=f"Signer={random_owner.address} is not an owner. Current owners=['{owner_1.address}', '{owner_2.address}']. Safe-operation-hash={safe_operation.hash}",
+                        code="invalid",
+                    )
+                ]
+            },
+        )
+        self.assertEqual(models.SafeOperationConfirmation.objects.all().count(), 2)
+
+    def test_user_operation_view(self):
+        random_user_operation_hash = (
+            "0x8aca9664752dbae36135fd0956c956fc4a370feeac67485b49bcd4b99608ae41"
+        )
+        response = self.client.get(
+            reverse(
+                "v1:account_abstraction:user-operation",
+                args=(random_user_operation_hash,),
+            )
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(
+            response.json(), {"detail": "No UserOperation matches the given query."}
+        )
+        safe_address = Account.create().address
+        safe_operation = factories.SafeOperationFactory(
+            user_operation__sender=safe_address
+        )
+        response = self.client.get(
+            reverse(
+                "v1:account_abstraction:user-operation",
+                args=(safe_operation.user_operation.hash,),
+            )
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        expected = {
+            "sender": safe_operation.user_operation.sender,
+            "nonce": str(safe_operation.user_operation.nonce),
+            "userOperationHash": safe_operation.user_operation.hash,
+            "ethereumTxHash": safe_operation.user_operation.ethereum_tx_id,
+            "initCode": "0x",
+            "callData": "0x",
+            "callGasLimit": str(safe_operation.user_operation.call_gas_limit),
+            "verificationGasLimit": str(
+                safe_operation.user_operation.verification_gas_limit
+            ),
+            "preVerificationGas": str(
+                safe_operation.user_operation.pre_verification_gas
+            ),
+            "maxFeePerGas": str(safe_operation.user_operation.max_fee_per_gas),
+            "maxPriorityFeePerGas": str(
+                safe_operation.user_operation.max_priority_fee_per_gas
+            ),
+            "paymaster": NULL_ADDRESS,
+            "paymasterData": "0x",
+            "signature": "0x" + "0" * 24,
+            "entryPoint": safe_operation.user_operation.entry_point,
+            "safeOperation": {
+                "created": datetime_to_str(safe_operation.created),
+                "modified": datetime_to_str(safe_operation.modified),
+                "safeOperationHash": safe_operation.hash,
+                "validAfter": datetime_to_str(safe_operation.valid_after),
+                "validUntil": datetime_to_str(safe_operation.valid_until),
+                "moduleAddress": safe_operation.module_address,
+                "confirmations": [],
+                "preparedSignature": to_0x_hex_str(
+                    safe_operation.build_signature_prefix()
+                ),
+            },
+        }
+        self.assertDictEqual(
+            response.json(),
+            expected,
+        )
+
+    def test_user_operations_view(self):
+        safe_address = Account.create().address
+
+        response = self.client.get(
+            reverse(
+                "v1:account_abstraction:user-operations",
+                args=(safe_address,),
+            )
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.json(), {"count": 0, "next": None, "previous": None, "results": []}
+        )
+        safe_operation = factories.SafeOperationFactory(
+            user_operation__sender=safe_address,
+            user_operation__nonce=131872201376309576872419307987365003264,
+        )
+        response = self.client.get(
+            reverse("v1:account_abstraction:user-operations", args=(safe_address,))
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        expected = {
+            "sender": safe_operation.user_operation.sender,
+            "nonce": str(safe_operation.user_operation.nonce),
+            "userOperationHash": safe_operation.user_operation.hash,
+            "ethereumTxHash": safe_operation.user_operation.ethereum_tx_id,
+            "initCode": "0x",
+            "callData": "0x",
+            "callGasLimit": str(safe_operation.user_operation.call_gas_limit),
+            "verificationGasLimit": str(
+                safe_operation.user_operation.verification_gas_limit
+            ),
+            "preVerificationGas": str(
+                safe_operation.user_operation.pre_verification_gas
+            ),
+            "maxFeePerGas": str(safe_operation.user_operation.max_fee_per_gas),
+            "maxPriorityFeePerGas": str(
+                safe_operation.user_operation.max_priority_fee_per_gas
+            ),
+            "paymaster": NULL_ADDRESS,
+            "paymasterData": "0x",
+            "signature": "0x" + "0" * 24,
+            "entryPoint": safe_operation.user_operation.entry_point,
+            "safeOperation": {
+                "created": datetime_to_str(safe_operation.created),
+                "modified": datetime_to_str(safe_operation.modified),
+                "safeOperationHash": safe_operation.hash,
+                "validAfter": datetime_to_str(safe_operation.valid_after),
+                "validUntil": datetime_to_str(safe_operation.valid_until),
+                "moduleAddress": safe_operation.module_address,
+                "confirmations": [],
+                "preparedSignature": to_0x_hex_str(
+                    safe_operation.build_signature_prefix()
+                ),
+            },
+        }
+        self.assertDictEqual(
+            response.json(),
+            {"count": 1, "next": None, "previous": None, "results": [expected]},
+        )

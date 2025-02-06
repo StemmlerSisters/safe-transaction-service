@@ -12,17 +12,18 @@ from eth_typing import ChecksumAddress, HexStr
 from eth_utils import event_abi_to_log_topic
 from hexbytes import HexBytes
 from packaging.version import Version
-from web3 import Web3
-
-from gnosis.eth import EthereumClient, EthereumClientProvider
-from gnosis.eth.constants import NULL_ADDRESS
-from gnosis.eth.contracts import (
+from safe_eth.eth import EthereumClient, get_auto_ethereum_client
+from safe_eth.eth.constants import NULL_ADDRESS
+from safe_eth.eth.contracts import (
     get_safe_V1_0_0_contract,
     get_safe_V1_3_0_contract,
     get_safe_V1_4_1_contract,
 )
-from gnosis.safe import SafeTx
-from gnosis.safe.safe_signature import SafeSignature, SafeSignatureApprovedHash
+from safe_eth.safe import SafeTx
+from safe_eth.safe.safe_signature import SafeSignature, SafeSignatureApprovedHash
+from safe_eth.util.util import to_0x_hex_str
+from web3 import Web3
+from web3.exceptions import Web3RPCError
 
 from safe_transaction_service.account_abstraction.services import (
     AaProcessorService,
@@ -41,6 +42,7 @@ from ..models import (
     SafeContractDelegate,
     SafeLastStatus,
     SafeMasterCopy,
+    SafeRelevantTransaction,
     SafeStatus,
 )
 
@@ -55,6 +57,10 @@ class OwnerCannotBeRemoved(TxProcessorException):
     pass
 
 
+class ModuleCannotBeDisabled(TxProcessorException):
+    pass
+
+
 class UserOperationFailed(TxProcessorException):
     pass
 
@@ -64,7 +70,7 @@ class SafeTxProcessorProvider:
         if not hasattr(cls, "instance"):
             from django.conf import settings
 
-            ethereum_client = EthereumClientProvider()
+            ethereum_client = get_auto_ethereum_client()
             ethereum_tracing_client = (
                 EthereumClient(settings.ETHEREUM_TRACING_NODE_URL)
                 if settings.ETHEREUM_TRACING_NODE_URL
@@ -146,12 +152,18 @@ class SafeTxProcessor(TxProcessor):
             Version("1.3.0"),  # ChainId was included
         )
 
-    def clear_cache(self, safe_address: Optional[ChecksumAddress] = None) -> None:
+    def clear_cache(self, safe_address: Optional[ChecksumAddress] = None) -> bool:
+        """
+        :param safe_address:
+        :return: `True` if anything was deleted from cache, `False` otherwise
+        """
         if safe_address:
-            if safe_address in self.safe_last_status_cache:
+            if result := (safe_address in self.safe_last_status_cache):
                 del self.safe_last_status_cache[safe_address]
+            return result
         else:
             self.safe_last_status_cache.clear()
+            return True
 
     def is_failed(
         self, ethereum_tx: EthereumTx, safe_tx_hash: Union[HexStr, bytes]
@@ -300,6 +312,38 @@ class SafeTxProcessor(TxProcessor):
         )
         safe_message_models.SafeMessageConfirmation.objects.filter(owner=owner).delete()
 
+    def disable_module(
+        self,
+        internal_tx: InternalTx,
+        safe_status: SafeStatus,
+        module: ChecksumAddress,
+    ) -> None:
+        """
+        Disables a module for a Safe by removing it from the enabled modules list.
+
+        :param internal_tx:
+        :param safe_status:
+        :param module:
+        :return:
+        :raises ModuleCannotBeRemoved: If the module is not in the list of enabled modules.
+        """
+        contract_address = internal_tx._from
+        if module not in safe_status.enabled_modules:
+            logger.error(
+                "[%s] Error processing trace=%s with tx-hash=%s. Cannot disable module=%s . "
+                "Current enabled modules=%s",
+                contract_address,
+                internal_tx.trace_address,
+                internal_tx.ethereum_tx_id,
+                module,
+                safe_status.enabled_modules,
+            )
+            raise ModuleCannotBeDisabled(
+                f"Cannot disable module {module}. Current enabled modules {safe_status.enabled_modules}"
+            )
+
+        safe_status.enabled_modules.remove(module)
+
     def store_new_safe_status(
         self, safe_last_status: SafeLastStatus, internal_tx: InternalTx
     ) -> SafeLastStatus:
@@ -319,9 +363,15 @@ class SafeTxProcessor(TxProcessor):
     def process_decoded_transaction(
         self, internal_tx_decoded: InternalTxDecoded
     ) -> bool:
-        processed_successfully = self.__process_decoded_transaction(internal_tx_decoded)
-        internal_tx_decoded.set_processed()
-        self.clear_cache()
+        contract_address = internal_tx_decoded.internal_tx._from
+        self.clear_cache(safe_address=contract_address)
+        try:
+            processed_successfully = self.__process_decoded_transaction(
+                internal_tx_decoded
+            )
+            internal_tx_decoded.set_processed()
+        finally:
+            self.clear_cache(safe_address=contract_address)
         return processed_successfully
 
     @transaction.atomic
@@ -335,16 +385,26 @@ class SafeTxProcessor(TxProcessor):
         """
         internal_tx_ids = []
         results = []
+        contract_addresses = set()
 
+        # Clear cache for the involved Safes
         for internal_tx_decoded in internal_txs_decoded:
-            internal_tx_ids.append(internal_tx_decoded.internal_tx_id)
-            results.append(self.__process_decoded_transaction(internal_tx_decoded))
+            contract_address = internal_tx_decoded.internal_tx._from
+            contract_addresses.add(contract_address)
+            self.clear_cache(safe_address=contract_address)
 
-        # Set all as decoded in the same batch
-        InternalTxDecoded.objects.filter(internal_tx__in=internal_tx_ids).update(
-            processed=True
-        )
-        self.clear_cache()
+        try:
+            for internal_tx_decoded in internal_txs_decoded:
+                internal_tx_ids.append(internal_tx_decoded.internal_tx_id)
+                results.append(self.__process_decoded_transaction(internal_tx_decoded))
+
+            # Set all as decoded in the same batch
+            InternalTxDecoded.objects.filter(internal_tx__in=internal_tx_ids).update(
+                processed=True
+            )
+        finally:
+            for contract_address in contract_addresses:
+                self.clear_cache(safe_address=contract_address)
         return results
 
     def __process_decoded_transaction(
@@ -362,7 +422,7 @@ class SafeTxProcessor(TxProcessor):
         logger.debug(
             "[%s] Start processing InternalTxDecoded in tx-hash=%s",
             contract_address,
-            HexBytes(internal_tx_decoded.internal_tx.ethereum_tx_id).hex(),
+            to_0x_hex_str(HexBytes(internal_tx_decoded.internal_tx.ethereum_tx_id)),
         )
 
         if internal_tx.gas_used < 1000:
@@ -489,7 +549,7 @@ class SafeTxProcessor(TxProcessor):
                 self.store_new_safe_status(safe_last_status, internal_tx)
             elif function_name == "disableModule":
                 logger.debug("[%s] Disabling Module", contract_address)
-                safe_last_status.enabled_modules.remove(arguments["module"])
+                self.disable_module(internal_tx, safe_last_status, arguments["module"])
                 self.store_new_safe_status(safe_last_status, internal_tx)
             elif function_name in {
                 "execTransactionFromModule",
@@ -504,17 +564,21 @@ class SafeTxProcessor(TxProcessor):
                     # Regular Safe indexed using tracing
                     # Someone calls Module -> Module calls Safe Proxy -> Safe Proxy delegate calls Master Copy
                     # The trace that is being processed is the last one, so indexer needs to get the previous trace
-                    previous_trace = (
-                        self.ethereum_tracing_client.tracing.get_previous_trace(
-                            internal_tx.ethereum_tx_id,
-                            internal_tx.trace_address_as_list,
-                            skip_delegate_calls=True,
+                    try:
+                        previous_trace = (
+                            self.ethereum_tracing_client.tracing.get_previous_trace(
+                                internal_tx.ethereum_tx_id,
+                                internal_tx.trace_address_as_list,
+                                skip_delegate_calls=True,
+                            )
                         )
-                    )
+                    except Web3RPCError:
+                        previous_trace = None
+
                     if not previous_trace:
                         message = (
                             f"[{contract_address}] Cannot find previous trace for "
-                            f"tx-hash={HexBytes(internal_tx.ethereum_tx_id).hex()} "
+                            f"tx-hash={to_0x_hex_str(HexBytes(internal_tx.ethereum_tx_id))} "
                             f"and trace-address={internal_tx.trace_address}"
                         )
                         logger.warning(message)
@@ -541,6 +605,11 @@ class SafeTxProcessor(TxProcessor):
                         "operation": arguments["operation"],
                         "failed": failed,
                     },
+                )
+                SafeRelevantTransaction.objects.get_or_create(
+                    ethereum_tx=ethereum_tx,
+                    safe=contract_address,
+                    defaults={"timestamp": internal_tx.timestamp},
                 )
                 # Detect 4337 UserOperations in this transaction
                 number_detected_user_operations = (
@@ -569,7 +638,7 @@ class SafeTxProcessor(TxProcessor):
                     )
                     if not previous_trace:
                         message = (
-                            f"[{contract_address}] Cannot find previous trace for tx-hash={HexBytes(internal_tx.ethereum_tx_id).hex()} and "
+                            f"[{contract_address}] Cannot find previous trace for tx-hash={to_0x_hex_str(HexBytes(internal_tx.ethereum_tx_id))} and "
                             f"trace-address={internal_tx.trace_address}"
                         )
                         logger.warning(message)
@@ -610,7 +679,7 @@ class SafeTxProcessor(TxProcessor):
                         self.get_safe_version_from_master_copy(
                             safe_last_status.master_copy
                         )
-                        or "1.0.0"
+                        or "1.3.0"
                     )
                 else:
                     base_gas = arguments["dataGas"]
@@ -655,6 +724,11 @@ class SafeTxProcessor(TxProcessor):
                         "failed": failed,
                         "trusted": True,
                     },
+                )
+                SafeRelevantTransaction.objects.get_or_create(
+                    ethereum_tx=ethereum_tx,
+                    safe=contract_address,
+                    defaults={"timestamp": internal_tx.timestamp},
                 )
 
                 # Don't modify created

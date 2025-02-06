@@ -1,3 +1,4 @@
+import datetime
 from typing import Any, Dict
 
 from django.utils import timezone
@@ -7,10 +8,10 @@ from eth_account import Account
 from factory.django import DjangoModelFactory
 from factory.fuzzy import FuzzyInteger
 from hexbytes import HexBytes
-
-from gnosis.eth.constants import NULL_ADDRESS
-from gnosis.eth.utils import fast_keccak_text
-from gnosis.safe.safe_signature import SafeSignatureType
+from safe_eth.eth.constants import NULL_ADDRESS
+from safe_eth.eth.utils import fast_keccak_text
+from safe_eth.safe.safe_signature import SafeSignatureType
+from safe_eth.util.util import to_0x_hex_str
 
 from ..models import (
     ERC20Transfer,
@@ -31,9 +32,9 @@ from ..models import (
     SafeContractDelegate,
     SafeLastStatus,
     SafeMasterCopy,
+    SafeRelevantTransaction,
     SafeStatus,
     TokenTransfer,
-    WebHook,
 )
 
 
@@ -53,8 +54,12 @@ class EthereumBlockFactory(DjangoModelFactory):
     gas_limit = factory.fuzzy.FuzzyInteger(100000000, 200000000)
     gas_used = factory.fuzzy.FuzzyInteger(100000, 500000)
     timestamp = factory.LazyFunction(timezone.now)
-    block_hash = factory.Sequence(lambda n: fast_keccak_text(f"block-{n}").hex())
-    parent_hash = factory.Sequence(lambda n: fast_keccak_text(f"block{n - 1}").hex())
+    block_hash = factory.Sequence(
+        lambda n: to_0x_hex_str(fast_keccak_text(f"block-{n}"))
+    )
+    parent_hash = factory.Sequence(
+        lambda n: to_0x_hex_str(fast_keccak_text(f"block{n - 1}"))
+    )
 
 
 class EthereumTxFactory(DjangoModelFactory):
@@ -63,7 +68,7 @@ class EthereumTxFactory(DjangoModelFactory):
 
     block = factory.SubFactory(EthereumBlockFactory)
     tx_hash = factory.Sequence(
-        lambda n: fast_keccak_text(f"ethereum_tx_hash-{n}").hex()
+        lambda n: to_0x_hex_str(fast_keccak_text(f"ethereum_tx_hash-{n}"))
     )
     _from = factory.LazyFunction(lambda: Account.create().address)
     gas = factory.fuzzy.FuzzyInteger(1000, 5000)
@@ -90,6 +95,23 @@ class TokenTransfer(DjangoModelFactory):
     class Meta:
         model = TokenTransfer
         abstract = True
+
+    @factory.post_generation
+    def safe_relevant_tx(self, create, extracted, **kwargs):
+        if not create:
+            return
+        ethereum_tx_id = self.ethereum_tx_id
+        timestamp = self.ethereum_tx.block.timestamp
+        SafeRelevantTransaction.objects.get_or_create(
+            safe=self._from,
+            ethereum_tx_id=ethereum_tx_id,
+            defaults={"timestamp": timestamp},
+        )
+        SafeRelevantTransaction.objects.get_or_create(
+            safe=self.to,
+            ethereum_tx_id=ethereum_tx_id,
+            defaults={"timestamp": timestamp},
+        )
 
 
 class ERC20TransferFactory(TokenTransfer):
@@ -127,6 +149,16 @@ class InternalTxFactory(DjangoModelFactory):
     call_type = EthereumTxCallType.CALL.value
     trace_address = factory.Sequence(str)
     error = None
+
+    @factory.post_generation
+    def safe_relevant_tx(self, create, extracted, **kwargs):
+        if not create or not self.is_ether_transfer:
+            return
+        SafeRelevantTransaction.objects.get_or_create(
+            safe=self.to,
+            ethereum_tx_id=self.ethereum_tx_id,
+            defaults={"timestamp": self.ethereum_tx.block.timestamp},
+        )
 
 
 class InternalTxDecodedFactory(DjangoModelFactory):
@@ -221,6 +253,7 @@ class ModuleTransactionFactory(DjangoModelFactory):
     class Meta:
         model = ModuleTransaction
 
+    created = factory.LazyAttribute(lambda o: o.internal_tx.timestamp)
     internal_tx = factory.SubFactory(InternalTxFactory)
     safe = factory.LazyFunction(lambda: Account.create().address)
     module = factory.LazyFunction(lambda: Account.create().address)
@@ -230,15 +263,27 @@ class ModuleTransactionFactory(DjangoModelFactory):
     operation = FuzzyInteger(low=0, high=1)
     failed = False
 
+    @factory.post_generation
+    def safe_relevant_tx(self, create, extracted, **kwargs):
+        if not create:
+            return
+        SafeRelevantTransaction.objects.get_or_create(
+            safe=self.safe,
+            ethereum_tx_id=self.internal_tx.ethereum_tx_id,
+            defaults={"timestamp": self.internal_tx.ethereum_tx.block.timestamp},
+        )
+
 
 class MultisigTransactionFactory(DjangoModelFactory):
     class Meta:
         model = MultisigTransaction
 
     safe_tx_hash = factory.Sequence(
-        lambda n: fast_keccak_text(f"multisig-tx-{n}").hex()
+        lambda n: to_0x_hex_str(fast_keccak_text(f"multisig-tx-{n}"))
     )
     safe = factory.LazyFunction(lambda: Account.create().address)
+    proposer = None
+    proposed_by_delegate = None
     ethereum_tx = factory.SubFactory(EthereumTxFactory)
     to = factory.LazyFunction(lambda: Account.create().address)
     value = FuzzyInteger(low=0, high=10)
@@ -255,6 +300,16 @@ class MultisigTransactionFactory(DjangoModelFactory):
     origin = factory.Faker("name")
     trusted = False
 
+    @factory.post_generation
+    def safe_relevant_tx(self, create, extracted, **kwargs):
+        if not create or not self.ethereum_tx:
+            return
+        SafeRelevantTransaction.objects.get_or_create(
+            safe=self.safe,
+            ethereum_tx_id=self.ethereum_tx_id,
+            defaults={"timestamp": self.ethereum_tx.block.timestamp},
+        )
+
 
 class MultisigConfirmationFactory(DjangoModelFactory):
     class Meta:
@@ -263,7 +318,7 @@ class MultisigConfirmationFactory(DjangoModelFactory):
     ethereum_tx = factory.SubFactory(EthereumTxFactory)
     multisig_transaction = factory.SubFactory(MultisigTransactionFactory)
     multisig_transaction_hash = factory.Sequence(
-        lambda n: fast_keccak_text(f"multisig-confirmation-tx-{n}").hex()
+        lambda n: to_0x_hex_str(fast_keccak_text(f"multisig-confirmation-tx-{n}"))
     )
     owner = factory.LazyFunction(lambda: Account.create().address)
     signature = None
@@ -288,6 +343,7 @@ class SafeContractDelegateFactory(DjangoModelFactory):
     label = factory.Faker("name")
     read = True
     write = True
+    expiry_date = timezone.now() + datetime.timedelta(minutes=90)
 
 
 class MonitoredAddressFactory(DjangoModelFactory):
@@ -310,6 +366,15 @@ class SafeMasterCopyFactory(MonitoredAddressFactory):
         model = SafeMasterCopy
 
 
+class SafeRelevantTransactionFactory(DjangoModelFactory):
+    timestamp = factory.LazyFunction(timezone.now)
+    ethereum_tx = factory.SubFactory(EthereumTxFactory)
+    safe = factory.LazyFunction(lambda: Account.create().address)
+
+    class Meta:
+        model = SafeRelevantTransaction
+
+
 class SafeLastStatusFactory(DjangoModelFactory):
     class Meta:
         model = SafeLastStatus
@@ -328,17 +393,3 @@ class SafeLastStatusFactory(DjangoModelFactory):
 class SafeStatusFactory(SafeLastStatusFactory):
     class Meta:
         model = SafeStatus
-
-
-class WebHookFactory(DjangoModelFactory):
-    class Meta:
-        model = WebHook
-
-    address = factory.LazyFunction(lambda: Account.create().address)
-    url = factory.Sequence(lambda n: f"http://localhost/test/{n}")
-    # Configurable webhook types to listen to
-    new_confirmation = True
-    pending_multisig_transaction = True
-    new_executed_multisig_transaction = True
-    new_incoming_transaction = True
-    authorization = None
